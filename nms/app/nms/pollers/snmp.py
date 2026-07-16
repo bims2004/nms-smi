@@ -86,3 +86,41 @@ def poll_snmp_customers(device: dict, customers: list) -> dict:
             }
 
     return results
+
+
+OID_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"  # ifName
+
+
+def walk_if_names(device: dict) -> dict:
+    """Ambil {ifIndex: ifName} dari perangkat.
+
+    Dipakai diagnosa untuk memastikan ifIndex yang terdaftar memang ada.
+    ifIndex bisa bergeser setelah reboot atau perubahan modul, dan itu
+    penyebab paling sering pelanggan SNMP tiba-tiba kehilangan data.
+    """
+    from pysnmp.hlapi import (
+        CommunityData, ContextData, ObjectIdentity, ObjectType,
+        SnmpEngine, UdpTransportTarget, nextCmd,
+    )
+
+    result = {}
+    it = nextCmd(
+        SnmpEngine(),
+        CommunityData(device["snmp_community"] or "public", mpModel=1),
+        UdpTransportTarget(
+            (str(device["ip"]), device["snmp_port"] or 161),
+            timeout=config.SNMP_TIMEOUT, retries=config.SNMP_RETRIES,
+        ),
+        ContextData(),
+        ObjectType(ObjectIdentity(OID_IF_NAME)),
+        lexicographicMode=False,
+    )
+    for error_indication, error_status, _, var_binds in it:
+        if error_indication:
+            raise RuntimeError(str(error_indication))
+        if error_status:
+            raise RuntimeError(error_status.prettyPrint())
+        for oid, val in var_binds:
+            idx = int(str(oid).rsplit(".", 1)[1])
+            result[idx] = str(val)
+    return result

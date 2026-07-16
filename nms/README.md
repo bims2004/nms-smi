@@ -345,3 +345,258 @@ semua migrasi ditulis idempotent — aman dijalankan berulang.
 
 Instalasi baru tidak perlu langkah ini; `docker compose up -d --build`
 sudah cukup.
+
+---
+
+# Fase 4 — Grafik riwayat & pemakaian
+
+## Yang sebenarnya sudah ada sejak Fase 1
+
+Data traffic **sudah tersimpan otomatis** di `traffic_samples` tiap 60 detik
+sejak collector pertama kali jalan. Yang belum ada sebelumnya cuma cara
+melihatnya: grafik lama hanya menampilkan beberapa jam terakhir.
+
+## Pemilih periode
+
+Di halaman detail pelanggan sekarang ada:
+
+- **Rentang cepat**: 1 jam, 6 jam, 24 jam, 7 hari, 30 hari, 90 hari.
+- **Pemilih tanggal**: pilih tanggal, lihat pemakaian sehari penuh
+  (00:00–23:59 waktu lokal), lengkap dengan tombol maju-mundur hari.
+
+Ukuran bucket menyesuaikan otomatis: 1 menit untuk rentang pendek sampai
+6 jam untuk 90 hari. Tanpa ini, 30 hari data per menit = 43.200 titik yang
+tidak mungkin digambar.
+
+## Angka pemakaian
+
+| Angka | Arti |
+|---|---|
+| **Volume total** | Data terpakai dalam periode, pecah jadi download & upload |
+| **Rata-rata** | Rerata bps sepanjang periode |
+| **Puncak** | Nilai tertinggi yang pernah tersentuh |
+| **95th percentile** | Nilai yang dilampaui hanya 5% waktu — dasar penagihan yang lazim di ISP |
+
+Cara volume dihitung, dan kenapa begitu:
+
+Volume dihitung dari **jarak waktu tiap sampel ke sampel sebelumnya**, bukan
+dari lebar bucket grafik. Kalau pakai lebar bucket, bucket di tepi periode
+yang cuma terisi sebagian akan dihitung penuh dan volumenya menggelembung —
+versi pertama fitur ini punya bug persis itu, 30 hari terbaca 3x lipat dari
+yang sebenarnya.
+
+Jeda data lebih dari 10 menit **tidak dihitung**. Kalau perangkat mati
+semalam, kita memang tidak tahu berapa traffic yang lewat, jadi lebih baik
+tidak mengarang. Konsekuensinya: volume pelanggan yang sering down akan
+lebih rendah dari kenyataan, bukan lebih tinggi.
+
+95th percentile dihitung dari rata-rata 5 menit, mengambil nilai in/out yang
+lebih besar tiap interval — cara yang lazim dipakai transit provider. Hanya
+bisa dihitung dari sampel mentah, jadi terbatas 90 hari terakhir.
+
+## Riwayat lebih dari 90 hari
+
+`traffic_samples` dihapus otomatis setelah 90 hari. Menyimpan sampel per
+menit selamanya terlalu boros: 1 pelanggan = 525.600 baris per tahun.
+
+`db/init/03_rollup.sql` membuat **continuous aggregate** `traffic_hourly` —
+rollup per jam yang diperbarui sendiri oleh TimescaleDB di latar belakang
+(tidak ada cron yang perlu diurus). Ukurannya sekitar 60x lebih hemat, dan
+disimpan 2 tahun.
+
+Dashboard memilih sumbernya otomatis: rentang di bawah 60 hari dibaca dari
+sampel mentah, di atas itu dari rollup. Grafik yang memakai rollup diberi
+tanda "dari rollup jam-an".
+
+Untuk mengisi rollup dengan data yang sudah terkumpul:
+
+```sql
+CALL refresh_continuous_aggregate('traffic_hourly', NULL, NULL);
+```
+
+**Yang belum teruji:** pembuatan continuous aggregate-nya sendiri belum bisa
+saya uji, karena lingkungan tes saya tidak punya TimescaleDB — yang teruji
+baru jalur query-nya (terhadap tabel tiruan berbentuk sama) dan penanganan
+saat TimescaleDB tidak ada. Verifikasi di server kamu setelah migrasi:
+
+```bash
+docker compose exec db psql -U nms -d nms -c "\d+ traffic_hourly"
+docker compose exec db psql -U nms -d nms \
+  -c "SELECT view_name, materialization_hypertable_name
+      FROM timescaledb_information.continuous_aggregates;"
+```
+
+Kalau `traffic_hourly` tidak terbentuk, dashboard tetap jalan normal —
+fungsi `rollup_available()` mendeteksinya dan jatuh ke sampel mentah,
+hanya saja riwayat terbatas 90 hari.
+
+---
+
+# Diagnosa
+
+Kalau ada yang tidak beres — status pelanggan tidak berubah dari
+"Belum diketahui", dashboard tidak bisa dibuka, alert tidak sampai —
+jalankan ini dulu sebelum membaca log mentah:
+
+```bash
+./scripts/diagnose.sh
+```
+
+Script ini menelusuri seluruh rantai dari perangkat sampai dashboard dan
+menunjuk mata rantai mana yang putus, lengkap dengan perintah perbaikannya.
+Yang diperiksa:
+
+| Lapis | Isi pemeriksaan |
+|---|---|
+| Berkas | `.env` ada, `POSTGRES_PASSWORD` & `DJANGO_SECRET_KEY` terisi |
+| Container | db / collector / alerter / web berjalan, bukan restart-loop |
+| Dashboard | benar-benar menjawab di port-nya; mengingatkan URL harus pakai port; cek ufw |
+| Database | TimescaleDB aktif, `traffic_samples` benar hypertable, rollup ada, schema Fase 3 sudah diterapkan |
+| Perangkat | **probe langsung dari dalam container collector** — jalur jaringan yang sama persis dengan proses polling |
+| ifIndex | walk `ifName` ke perangkat, cocokkan dengan ifIndex yang terdaftar |
+| Aliran data | jumlah sampel, umur sampel terakhir, laju sampel vs harapan |
+| Pelanggan | umur sampel & bps terakhir per pelanggan, status, kewajaran ambang |
+| Alert | notifikasi yang gagal terkirim |
+
+Dua pemeriksaan yang paling sering menyelamatkan waktu:
+
+**Probe dari dalam container.** SNMP yang jalan dari laptop kamu belum tentu
+jalan dari container — ACL di perangkat mengizinkan IP mana? Script ini
+mengetes dari tempat yang sebenarnya melakukan polling.
+
+**Verifikasi ifIndex.** Ini penyebab paling sering pelanggan SNMP tidak punya
+data. Kalau ifIndex yang terdaftar tidak ada di perangkat, script langsung
+menyebutkan ifIndex apa saja yang tersedia beserta namanya. Kalau ifIndex-nya
+ada tapi namanya sudah berbeda dari yang terdaftar, itu juga diperingatkan —
+ifIndex bisa bergeser setelah reboot atau perubahan modul, dan datanya diam-diam
+jadi milik interface lain.
+
+Keluar dengan status 1 kalau ada masalah, jadi bisa dipakai di cron atau CI.
+
+Diagnosa mendalamnya juga bisa dipanggil langsung:
+
+```bash
+docker compose exec collector python -m nms.diagnose
+```
+
+---
+
+# Memperkecil penyimpanan
+
+## Ukuran sebenarnya
+
+Terukur dari schema ini: satu baris `traffic_samples` memakan **73 byte** heap,
+ditambah indeks sekitar 27% dari total.
+
+| Pelanggan | 90 hari | Tanpa kompresi | Dipadatkan (perkiraan 8x) |
+|---|---|---|---|
+| 1 | 129.600 baris | 12 MB | ~1,5 MB |
+| 50 | 6,5 juta baris | 600 MB | ~75 MB |
+| 500 | 65 juta baris | 6 GB | ~750 MB |
+
+**Terus terang: di skala kamu sekarang (1 pelanggan) ini belum ada gunanya.**
+90 hari data cuma 12 MB. Kompresi menghemat sekitar 10 MB — tidak berarti apa-apa.
+
+Yang membuatnya tetap layak dipasang sekarang: mengaktifkan kompresi belakangan
+berarti harus memadatkan ulang semua chunk yang sudah terlanjur menumpuk. Lebih
+murah dipasang selagi datanya masih sedikit. Anggap ini asuransi untuk saat
+pelanggan bertambah, bukan perbaikan masalah hari ini.
+
+## Kompresi kolom TimescaleDB
+
+`db/init/04_kompresi.sql` mengaktifkan kompresi kolom. Data time-series adalah
+kasus terbaiknya: nilai berurutan saling mirip, jadi yang disimpan cukup
+selisihnya.
+
+```sql
+ALTER TABLE traffic_samples SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'customer_id',
+    timescaledb.compress_orderby   = 'time DESC'
+);
+SELECT add_compression_policy('traffic_samples', INTERVAL '7 days');
+```
+
+Dua keputusan di situ, dan alasannya:
+
+**Ambang 7 hari, bukan lebih pendek.** Refresh continuous aggregate menyentuh
+data 3 hari ke belakang (lihat `03_rollup.sql`). Kalau kompresi mengejar lebih
+cepat dari itu, rollup akan terus-menerus membongkar chunk yang baru saja
+dipadatkan — boros CPU, hasilnya malah lebih lambat. Jarak 7 vs 3 hari memberi
+jeda yang aman.
+
+**segmentby customer_id.** Ini pilihan yang bisa menjadi bumerang. Kalau tiap
+segmen cuma berisi belasan baris, overhead per segmen lebih besar dari yang
+dihemat dan ukuran data justru **membengkak** — ini kejadian nyata yang
+dilaporkan orang. Hitungannya untuk kita: chunk default 7 hari, polling 60
+detik, jadi **10.080 baris per pelanggan per chunk**. Angka itu sama berapa pun
+jumlah pelanggan, dan jauh di atas ambang bahaya. Aman.
+
+`./scripts/diagnose.sh` memverifikasi keduanya secara empiris: melaporkan rasio
+kompresi nyata, memperingatkan kalau rasionya di bawah 3x, dan menjerit kalau
+di bawah 1x (artinya malah membesar).
+
+## Memadatkan data lama sekarang juga
+
+Policy hanya memadatkan chunk baru secara bertahap. Untuk yang sudah ada:
+
+```bash
+docker compose exec db psql -U nms -d nms -c \
+  "SELECT compress_chunk(c, if_not_compressed => true)
+   FROM show_chunks('traffic_samples', older_than => INTERVAL '7 days') c;"
+```
+
+Butuh ruang disk kosong sementara. Untuk tabel besar, jalankan bertahap.
+
+## Kalau masih kurang
+
+**Perpendek retensi data mentah.** Sekarang 90 hari. Rollup jam-an sudah
+menyimpan riwayat 2 tahun, jadi data mentah hanya benar-benar dibutuhkan untuk
+95th percentile — yang siklusnya bulanan. 45 hari sudah cukup dan memangkas
+setengah:
+
+```sql
+SELECT remove_retention_policy('traffic_samples');
+SELECT add_retention_policy('traffic_samples', INTERVAL '45 days');
+```
+
+**Perlambat polling.** 60 detik ke 120 detik memangkas separuh, langsung.
+Harganya: gangguan terdeteksi 2x lebih lambat. Untuk pelanggan dedicated
+biasanya tidak sepadan.
+
+## Yang saya temukan tapi belum saya ubah
+
+`in_octets` dan `out_octets` **ditulis ke database tapi tidak pernah dibaca
+oleh apa pun** — collector menghitung bps dari cache di memorinya sendiri.
+Secara ukuran, keduanya sekitar 20 byte per baris.
+
+Saya biarkan karena dua alasan: nilainya berguna saat mendiagnosa counter yang
+wrap atau reset, dan justru counter yang naik nyaris linier seperti ini adalah
+kasus paling ideal untuk kompresi — setelah dipadatkan, harganya mendekati nol.
+Menghapusnya sekarang berarti membuang alat diagnosa demi hemat yang sudah
+diberikan kompresi secara gratis.
+
+Catatan jujur: keduanya bertipe `NUMERIC`, bukan `BIGINT`. Saya pilih NUMERIC di
+Fase 1 karena counter SNMP 64-bit *unsigned* bisa mencapai 1,8e19, melebihi
+batas BIGINT (9,2e18). Uncompressed, keduanya sama persis besarnya — sudah saya
+ukur, selisihnya 2 byte dan ditelan padding. Setelah dikompresi, BIGINT
+kemungkinan lebih hemat karena bisa memakai delta encoding, tapi **saya tidak
+bisa mengukurnya** dan tidak mau menebak. Kalau nanti terbukti jadi masalah,
+mengubah tipe kolom pada hypertable berisi data adalah operasi berat, jadi jangan
+dilakukan tanpa alasan terukur.
+
+## Yang belum teruji
+
+Sama seperti rollup: **kompresinya sendiri belum bisa saya uji** karena
+lingkungan tes saya tidak punya TimescaleDB. Yang sudah teruji: migrasinya
+idempotent dan lewat dengan aman kalau TimescaleDB tidak ada, nama-nama fungsi
+statistiknya sudah saya cocokkan dengan dokumentasi resmi, dan jalur fallback
+di diagnosa berjalan. Angka 8x di tabel atas adalah **perkiraan**, bukan hasil
+ukur — data seperti ini umumnya 5-15x, tapi yang berlaku adalah angka yang
+keluar di servermu.
+
+Verifikasi setelah migrasi:
+
+```bash
+./scripts/diagnose.sh          # lihat bagian Penyimpanan
+```

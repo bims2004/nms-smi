@@ -1,14 +1,22 @@
 """View dashboard NMS."""
+import csv
+from calendar import monthrange
+from datetime import datetime as _dt
 from datetime import timedelta
 
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.db import connection
-from django.http import JsonResponse
+from django.db.models import Q
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.formats import date_format
+from django.views.decorators.http import require_POST
 
 from .discovery import discover_pppoe_sessions, discover_snmp_interfaces
-from .models import ALERT_TYPE_LABEL, Alert, Customer, Device
+from .models import (ALERT_TYPE_LABEL, Alert, Customer, Device,
+                     MaintenanceWindow)
 
 SPARK_MINUTES = 60
 SPARK_BUCKET = "2 minutes"
@@ -24,6 +32,16 @@ def fmt_bps(v):
         if v >= div:
             return f"{v / div:.2f} {unit}"
     return f"{int(v)} bps"
+
+
+def fmt_bytes(v):
+    """Volume data dalam satuan yang enak dibaca."""
+    if v is None:
+        return "—"
+    for unit, div in (("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if v >= div:
+            return f"{v / div:.2f} {unit}"
+    return f"{v:.0f} B"
 
 
 def fmt_bps_axis(v):
@@ -215,60 +233,249 @@ def status_json(request):
     })
 
 
-@login_required
-def customer_detail(request, pk):
-    c = get_object_or_404(Customer.objects.select_related("device"), pk=pk)
+# Rentang yang bisa dipilih: (kode, label, jumlah jam, ukuran bucket)
+RANGES = [
+    ("1h",  "1 jam",    1,    "1 minute"),
+    ("6h",  "6 jam",    6,    "1 minute"),
+    ("24h", "24 jam",   24,   "5 minutes"),
+    ("7d",  "7 hari",   168,  "30 minutes"),
+    ("30d", "30 hari",  720,  "2 hours"),
+    ("90d", "90 hari",  2160, "6 hours"),
+]
+RANGE_MAP = {r[0]: r for r in RANGES}
 
-    try:
-        hours = max(1, min(168, int(request.GET.get("hours", 6))))
-    except ValueError:
-        hours = 6
-    bucket = "1 minute" if hours <= 6 else ("5 minutes" if hours <= 24 else "30 minutes")
 
+def parse_period(request):
+    """Tentukan rentang waktu yang diminta.
+
+    Dua mode: rentang relatif (?range=24h) atau satu tanggal penuh
+    (?date=2026-07-15, 00:00-23:59 waktu lokal).
+    """
+    tz = timezone.get_current_timezone()
+    now = timezone.now()
+    date_str = request.GET.get("date", "").strip()
+
+    if date_str:
+        try:
+            d = _dt.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            d = timezone.localdate()
+        start = timezone.make_aware(_dt(d.year, d.month, d.day), tz)
+        end = min(start + timedelta(days=1), now)
+        if end <= start:
+            # Tanggal di masa depan: tidak ada data, jangan bikin rentang negatif
+            end = start + timedelta(days=1)
+        return {
+            "start": start, "end": end, "bucket": "5 minutes",
+            "mode": "date", "date": d, "range": None,
+            # date_format ikut locale Django (id-ID); strftime tidak — dia
+            # pakai locale C dan menghasilkan nama bulan berbahasa Inggris.
+            "label": date_format(timezone.localtime(start), "j F Y"),
+        }
+
+    code = request.GET.get("range", "6h")
+    if code not in RANGE_MAP:
+        code = "6h"
+    _, label, hours, bucket = RANGE_MAP[code]
+    return {
+        "start": now - timedelta(hours=hours), "end": now, "bucket": bucket,
+        "mode": "range", "date": None, "range": code,
+        "label": f"{label} terakhir",
+    }
+
+
+def fetch_series(customer_id, period):
+    """Ambil data traffic yang sudah di-bucket.
+
+    Sampel mentah hanya disimpan 90 hari. Untuk rentang yang lebih panjang,
+    dibaca dari rollup jam-an (traffic_hourly) yang disimpan jauh lebih lama.
+    """
+    span_days = (period["end"] - period["start"]).total_seconds() / 86400
+    use_rollup = span_days > 60 and rollup_available()
+
+    with connection.cursor() as cur:
+        if use_rollup:
+            cur.execute(
+                """
+                SELECT time_bucket(%s::interval, bucket) AS b,
+                       avg(avg_in)::float, avg(avg_out)::float,
+                       max(max_in)::float, max(max_out)::float,
+                       sum(down_samples) = 0 AS link_up
+                FROM traffic_hourly
+                WHERE customer_id = %s AND bucket >= %s AND bucket < %s
+                GROUP BY b ORDER BY b
+                """,
+                (period["bucket"], customer_id, period["start"], period["end"]),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT time_bucket(%s::interval, time) AS b,
+                       avg(in_bps)::float, avg(out_bps)::float,
+                       max(in_bps)::float, max(out_bps)::float,
+                       bool_and(link_up) AS link_up
+                FROM traffic_samples
+                WHERE customer_id = %s AND time >= %s AND time < %s
+                GROUP BY b ORDER BY b
+                """,
+                (period["bucket"], customer_id, period["start"], period["end"]),
+            )
+        return cur.fetchall(), use_rollup
+
+
+def rollup_available():
+    """traffic_hourly hanya ada kalau migrasi rollup sudah dijalankan."""
+    with connection.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.traffic_hourly') IS NOT NULL")
+        return cur.fetchone()[0]
+
+
+def volume_bytes(customer_id, period, use_rollup):
+    """Volume data terpakai, dalam byte.
+
+    Dihitung dari jarak waktu tiap sampel ke sampel sebelumnya, bukan dari
+    lebar bucket. Kalau pakai lebar bucket, bucket yang cuma terisi sebagian
+    (selalu terjadi di awal & akhir periode) akan dihitung penuh dan volumenya
+    menggelembung.
+
+    Jeda lebih dari 10 menit dianggap tidak ada data, bukan traffic yang
+    berlanjut di kecepatan terakhir — kalau perangkat mati semalam, kita
+    memang tidak tahu apa yang lewat, jadi jangan mengarang.
+    """
+    with connection.cursor() as cur:
+        if use_rollup:
+            # Rollup sudah per jam penuh; samples menyimpan jumlah sampel asli
+            cur.execute(
+                """
+                SELECT sum(avg_in * samples * 60) / 8,
+                       sum(avg_out * samples * 60) / 8
+                FROM traffic_hourly
+                WHERE customer_id = %s AND bucket >= %s AND bucket < %s
+                """,
+                (customer_id, period["start"], period["end"]),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT sum(in_bps * gap) / 8, sum(out_bps * gap) / 8
+                FROM (
+                    SELECT in_bps, out_bps,
+                           EXTRACT(EPOCH FROM (
+                               time - lag(time) OVER (ORDER BY time)
+                           )) AS gap
+                    FROM traffic_samples
+                    WHERE customer_id = %s AND time >= %s AND time < %s
+                      AND in_bps IS NOT NULL
+                ) x
+                WHERE gap IS NOT NULL AND gap <= 600
+                """,
+                (customer_id, period["start"], period["end"]),
+            )
+        row = cur.fetchone()
+    return (float(row[0]) if row and row[0] is not None else 0.0,
+            float(row[1]) if row and row[1] is not None else 0.0)
+
+
+def usage_stats(customer_id, period, series, use_rollup):
+    """Hitung pemakaian: volume, rata-rata, puncak, dan 95th percentile."""
+    ins = [r[1] for r in series if r[1] is not None]
+    outs = [r[2] for r in series if r[2] is not None]
+    if not ins and not outs:
+        return None
+
+    vol_in, vol_out = volume_bytes(customer_id, period, use_rollup)
+
+    # 95th percentile: cara penagihan yang lazim di ISP. Dihitung dari
+    # rata-rata 5 menit, ambil nilai in/out yang lebih besar tiap interval.
+    # Hanya bisa dari sampel mentah, jadi terbatas 90 hari terakhir.
+    p95 = None
     with connection.cursor() as cur:
         cur.execute(
             """
-            SELECT time_bucket(%s::interval, time) AS b,
-                   avg(in_bps) AS in_bps, avg(out_bps) AS out_bps,
-                   bool_and(link_up) AS link_up
-            FROM traffic_samples
-            WHERE customer_id = %s AND time > now() - %s::interval
-            GROUP BY b ORDER BY b
+            SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY v)
+            FROM (
+                SELECT greatest(avg(in_bps), avg(out_bps)) AS v
+                FROM traffic_samples
+                WHERE customer_id = %s AND time >= %s AND time < %s
+                  AND in_bps IS NOT NULL
+                GROUP BY time_bucket('5 minutes'::interval, time)
+            ) x
             """,
-            (bucket, c.id, f"{hours} hours"),
+            (customer_id, period["start"], period["end"]),
         )
-        series = cur.fetchall()
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            p95 = float(row[0])
 
-    chart = build_chart(series)
+    return {
+        "vol_in": fmt_bytes(vol_in),
+        "vol_out": fmt_bytes(vol_out),
+        "vol_total": fmt_bytes(vol_in + vol_out),
+        "avg_in": fmt_bps(sum(ins) / len(ins) if ins else None),
+        "avg_out": fmt_bps(sum(outs) / len(outs) if outs else None),
+        "peak_in": fmt_bps(max((r[3] for r in series if r[3] is not None),
+                               default=None)),
+        "peak_out": fmt_bps(max((r[4] for r in series if r[4] is not None),
+                                default=None)),
+        "p95": fmt_bps(p95) if p95 is not None else None,
+        "p95_stale": use_rollup,
+    }
+
+
+@login_required
+def customer_detail(request, pk):
+    c = get_object_or_404(Customer.objects.select_related("device"), pk=pk)
+    period = parse_period(request)
+    series, from_rollup = fetch_series(c.id, period)
+
+    stats = usage_stats(c.id, period, series, from_rollup)
+    chart = build_chart(series, period)
 
     alerts = list(Alert.objects.filter(customer=c)[:20])
     for a in alerts:
         a.dur = fmt_duration(a.duration) if a.resolved_at else "berlangsung"
+        a.label = ALERT_TYPE_LABEL.get(a.alert_type, a.alert_type)
 
-    # Uptime kasar dari akumulasi durasi gangguan
-    since = timezone.now() - timedelta(hours=hours)
+    # Uptime dalam periode yang dipilih
+    window = (period["end"] - period["start"]).total_seconds()
     down_secs = 0.0
-    for a in Alert.objects.filter(customer=c, started_at__gte=since):
-        end = a.resolved_at or timezone.now()
-        down_secs += (end - a.started_at).total_seconds()
-    window = hours * 3600
+    for a in Alert.objects.filter(customer=c, severity="major",
+                                  started_at__lt=period["end"]).filter(
+            Q(resolved_at__isnull=True) | Q(resolved_at__gt=period["start"])):
+        s = max(a.started_at, period["start"])
+        e = min(a.resolved_at or period["end"], period["end"])
+        if e > s:
+            down_secs += (e - s).total_seconds()
     uptime = max(0.0, 100.0 * (1 - down_secs / window)) if window else 100.0
 
+    today = timezone.localdate()
     return render(request, "monitor/customer_detail.html", {
         "c": c,
         "chart": chart,
+        "stats": stats,
         "alerts": alerts,
-        "hours": hours,
+        "period": period,
+        "ranges": RANGES,
+        "from_rollup": from_rollup,
+        "today": today.strftime("%Y-%m-%d"),
+        "date_value": period["date"].strftime("%Y-%m-%d") if period["date"] else "",
+        "prev_date": ((period["date"] or today) - timedelta(days=1)).strftime("%Y-%m-%d"),
+        "next_date": ((period["date"] or today) + timedelta(days=1)).strftime("%Y-%m-%d"),
+        "has_next": (period["date"] or today) < today,
         "uptime": f"{uptime:.2f}",
         "nav": "dashboard",
     })
 
 
-def build_chart(series, width=900, height=220):
+def build_chart(series, period=None, width=900, height=220):
     """Chart traffic in/out, SVG dibuat di server."""
     if not series:
         return None
-    pad_l, pad_b, pad_t = 46, 26, 10
+    # Label sumbu Y ditaruh DI DALAM area plot, tepat di atas garis grid.
+    # Kalau ditaruh di luar, lebarnya harus ditebak dari ukuran font —
+    # dan font-nya diperbesar lewat CSS di layar sempit, jadi tebakan apa pun
+    # akan salah di salah satu ukuran layar. Di dalam, tidak pernah terpotong.
+    pad_l, pad_b, pad_t = 10, 26, 26
     plot_w = width - pad_l - 12
     plot_h = height - pad_b - pad_t
 
@@ -299,19 +506,29 @@ def build_chart(series, width=900, height=220):
         y = pad_t + plot_h - (i / 4) * plot_h
         grid.append({
             "y": f"{y:.1f}",
-            "y_label": f"{y + 4:.1f}",
+            "y_label": f"{y - 6:.1f}",
             "label": fmt_bps_axis(hi * i / 4),
         })
 
+    # Rentang lebih dari sehari butuh tanggal, bukan cuma jam
+    span = (series[-1][0] - series[0][0]).total_seconds() if n > 1 else 0
+    if span > 86400 * 3:
+        fmt = "%d/%m"
+    elif span > 86400:
+        fmt = "%d/%m %H:%M"
+    else:
+        fmt = "%H:%M"
+    n_labels = 5 if n > 40 else 3
+    idxs = sorted({round(i * (n - 1) / (n_labels - 1)) for i in range(n_labels)})
     labels = []
-    for i in (0, n // 2, n - 1):
+    for i in idxs:
         if 0 <= i < n:
             # Label pertama & terakhir di-anchor ke tepi supaya tidak terpotong
             anchor = "start" if i == 0 else ("end" if i == n - 1 else "middle")
             labels.append({
                 "x": f"{pad_l + i * step:.1f}",
                 "anchor": anchor,
-                "t": timezone.localtime(series[i][0]).strftime("%H:%M"),
+                "t": timezone.localtime(series[i][0]).strftime(fmt),
             })
 
     return {
@@ -381,18 +598,6 @@ def home(request):
 
 
 # ================================================================ Fase 3
-import csv
-from calendar import monthrange
-from datetime import datetime as _dt
-
-from django.contrib import messages
-from django.db.models import Q
-from django.http import HttpResponse
-from django.views.decorators.http import require_POST
-
-from .models import MaintenanceWindow
-
-
 def month_bounds(year, month):
     """Rentang awal-akhir bulan dalam timezone lokal, sadar zona waktu."""
     tz = timezone.get_current_timezone()
