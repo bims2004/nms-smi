@@ -8,7 +8,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
 from .discovery import discover_pppoe_sessions, discover_snmp_interfaces
-from .models import Alert, Customer, Device
+from .models import ALERT_TYPE_LABEL, Alert, Customer, Device
 
 SPARK_MINUTES = 60
 SPARK_BUCKET = "2 minutes"
@@ -360,7 +360,7 @@ def device_interfaces(request, pk):
 
 @login_required
 def alert_list(request):
-    qs = Alert.objects.select_related("customer").all()
+    qs = Alert.objects.select_related("customer", "device").all()
     show = request.GET.get("show", "open")
     if show == "open":
         qs = qs.filter(resolved_at__isnull=True)
@@ -368,11 +368,195 @@ def alert_list(request):
     now = timezone.now()
     for a in alerts:
         a.dur = fmt_duration((a.resolved_at or now) - a.started_at)
+        a.label = ALERT_TYPE_LABEL.get(a.alert_type, a.alert_type)
     return render(request, "monitor/alerts.html", {
         "alerts": alerts, "show": show, "nav": "alerts",
+        "open_count": Alert.objects.filter(resolved_at__isnull=True).count(),
     })
 
 
 @login_required
 def home(request):
     return redirect("dashboard")
+
+
+# ================================================================ Fase 3
+import csv
+from calendar import monthrange
+from datetime import datetime as _dt
+
+from django.contrib import messages
+from django.db.models import Q
+from django.http import HttpResponse
+from django.views.decorators.http import require_POST
+
+from .models import MaintenanceWindow
+
+
+def month_bounds(year, month):
+    """Rentang awal-akhir bulan dalam timezone lokal, sadar zona waktu."""
+    tz = timezone.get_current_timezone()
+    start = timezone.make_aware(_dt(year, month, 1), tz)
+    last_day = monthrange(year, month)[1]
+    end = timezone.make_aware(
+        _dt(year, month, last_day, 23, 59, 59, 999999), tz
+    )
+    now = timezone.now()
+    # Bulan berjalan dihitung sampai sekarang, bukan sampai akhir bulan —
+    # kalau tidak, uptime bulan ini akan selalu terlihat bagus.
+    return start, min(end, now)
+
+
+def sla_rows(year, month, include_maintenance):
+    """Hitung downtime & uptime tiap pelanggan untuk satu bulan."""
+    start, end = month_bounds(year, month)
+    window = (end - start).total_seconds()
+    if window <= 0:
+        return [], start, end, 0
+
+    qs = Alert.objects.filter(
+        customer__isnull=False,
+        severity="major",
+        started_at__lt=end,
+    ).filter(Q(resolved_at__isnull=True) | Q(resolved_at__gt=start))
+    if not include_maintenance:
+        qs = qs.exclude(suppressed=True)
+
+    # Gabungkan interval yang tumpang tindih supaya downtime tidak dihitung
+    # dua kali kalau ada beberapa gangguan bersamaan.
+    per_cust = {}
+    for a in qs.select_related("customer"):
+        s = max(a.started_at, start)
+        e = min(a.resolved_at or end, end)
+        if e > s:
+            per_cust.setdefault(a.customer_id, []).append((s, e, a))
+
+    rows = []
+    for c in Customer.objects.select_related("device").all():
+        spans = sorted(per_cust.get(c.id, []), key=lambda x: x[0])
+        merged, down = [], 0.0
+        for s, e, _a in spans:
+            if merged and s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        for s, e in merged:
+            down += (e - s).total_seconds()
+        uptime = max(0.0, 100.0 * (1 - down / window))
+        rows.append({
+            "obj": c,
+            "incidents": len(spans),
+            "down_secs": down,
+            "down_fmt": fmt_duration(timedelta(seconds=down)) if down else "—",
+            "uptime": uptime,
+            "uptime_fmt": f"{uptime:.3f}",
+            "breach": uptime < 99.5,
+        })
+    rows.sort(key=lambda r: (r["uptime"], r["obj"].name))
+    return rows, start, end, window
+
+
+@login_required
+def sla_report(request):
+    now = timezone.localtime()
+    try:
+        year = int(request.GET.get("year", now.year))
+        month = int(request.GET.get("month", now.month))
+        if not (1 <= month <= 12) or not (2000 <= year <= 2100):
+            raise ValueError
+    except ValueError:
+        year, month = now.year, now.month
+
+    include_mt = request.GET.get("maintenance") == "1"
+    rows, start, end, window = sla_rows(year, month, include_mt)
+
+    if request.GET.get("format") == "csv":
+        resp = HttpResponse(content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = (
+            f'attachment; filename="sla-{year}-{month:02d}.csv"'
+        )
+        resp.write("\ufeff")  # BOM supaya Excel membaca UTF-8 dengan benar
+        w = csv.writer(resp)
+        w.writerow(["ID layanan", "Pelanggan", "Perangkat", "Titik monitor",
+                    "Jumlah gangguan", "Total down (detik)", "Total down",
+                    "Uptime (%)"])
+        for r in rows:
+            c = r["obj"]
+            w.writerow([
+                c.service_id or "", c.name, c.device.name,
+                c.if_name or c.pppoe_username or "",
+                r["incidents"], int(r["down_secs"]), r["down_fmt"],
+                f"{r['uptime']:.3f}",
+            ])
+        return resp
+
+    months = [
+        (i, _dt(2000, i, 1).strftime("%B")) for i in range(1, 13)
+    ]
+    id_months = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
+                 "Juli", "Agustus", "September", "Oktober", "November",
+                 "Desember"]
+    months = [(i + 1, m) for i, m in enumerate(id_months)]
+
+    return render(request, "monitor/sla.html", {
+        "rows": rows,
+        "year": year, "month": month,
+        "month_name": id_months[month - 1],
+        "months": months,
+        "years": range(now.year - 2, now.year + 1),
+        "start": start, "end": end,
+        "window_fmt": fmt_duration(timedelta(seconds=window)),
+        "include_mt": include_mt,
+        "breaches": sum(1 for r in rows if r["breach"]),
+        "nav": "sla",
+    })
+
+
+@login_required
+@require_POST
+def alert_ack(request, pk):
+    """Tandai gangguan sedang ditangani — menghentikan pengingat eskalasi."""
+    a = get_object_or_404(Alert, pk=pk)
+    if a.ack_at is None:
+        a.ack_at = timezone.now()
+        a.ack_by = request.user.get_username()
+        a.save(update_fields=["ack_at", "ack_by"])
+        messages.success(request, f"{a.subject} ditandai sedang ditangani.")
+    return redirect(request.POST.get("next") or "alert_list")
+
+
+@login_required
+def device_list(request):
+    devices = list(Device.objects.all())
+    now = timezone.now()
+    open_dev = {
+        a.device_id: a
+        for a in Alert.objects.filter(resolved_at__isnull=True,
+                                      device__isnull=False)
+    }
+    rows = []
+    for d in devices:
+        alert = open_dev.get(d.id)
+        if not d.enabled:
+            state = "disabled"
+        elif d.status == "down" or alert:
+            state = "down"
+        elif d.status == "up":
+            state = "up"
+        else:
+            state = "unknown"
+        rows.append({
+            "obj": d,
+            "state": state,
+            "customers": d.customer_set.count(),
+            "down_for": fmt_duration(now - alert.started_at) if alert else None,
+            "last_ok": d.last_ok_at,
+        })
+    rows.sort(key=lambda r: ({"down": 0, "unknown": 1, "up": 2,
+                              "disabled": 3}[r["state"]], r["obj"].name))
+    return render(request, "monitor/devices.html", {
+        "rows": rows, "nav": "devices",
+        "active_mw": MaintenanceWindow.objects.filter(
+            starts_at__lte=now, ends_at__gte=now
+        ).select_related("device", "customer"),
+    })

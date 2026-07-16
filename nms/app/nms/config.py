@@ -29,5 +29,14 @@ CONSECUTIVE_DOWN_SAMPLES = _int("CONSECUTIVE_DOWN_SAMPLES", 3)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# Timezone tampilan notifikasi
+# Timezone tampilan notifikasi & perhitungan baseline
 TZ_DISPLAY = os.environ.get("TZ_DISPLAY", "Asia/Jakarta")
+
+# Fase 3
+# Berapa kali polling gagal berturut-turut sebelum perangkat dianggap mati
+DEVICE_FAIL_THRESHOLD = _int("DEVICE_FAIL_THRESHOLD", 3)
+# Kirim pengingat kalau gangguan major belum di-ack setelah sekian menit.
+# 0 = matikan eskalasi.
+ESCALATION_MINUTES = _int("ESCALATION_MINUTES", 30)
+# Seberapa sering baseline dihitung ulang (jam)
+BASELINE_REFRESH_HOURS = _int("BASELINE_REFRESH_HOURS", 6)

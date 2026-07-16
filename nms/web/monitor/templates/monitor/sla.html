@@ -1,0 +1,92 @@
+{% extends "monitor/base.html" %}
+{% block title %}Laporan SLA — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Laporan SLA</h1>
+  <span class="sub mono">{{ month_name }} {{ year }}</span>
+  <span class="sub" style="margin-left:auto">
+    <a href="?year={{ year }}&month={{ month }}{% if include_mt %}&maintenance=1{% endif %}&format=csv">Unduh CSV</a>
+  </span>
+</div>
+
+<form method="get" class="panel" style="padding:12px 14px;margin-bottom:16px;
+      display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+  <select name="month" style="background:var(--surface-2);color:var(--text);
+          border:1px solid var(--hairline);border-radius:4px;padding:6px 9px;
+          font-family:var(--sans);font-size:13px">
+    {% for m, label in months %}
+    <option value="{{ m }}" {% if m == month %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="year" style="background:var(--surface-2);color:var(--text);
+          border:1px solid var(--hairline);border-radius:4px;padding:6px 9px;
+          font-family:var(--mono);font-size:13px">
+    {% for y in years %}
+    <option value="{{ y }}" {% if y == year %}selected{% endif %}>{{ y }}</option>
+    {% endfor %}
+  </select>
+  <label style="display:flex;align-items:center;gap:6px;font-size:13px;
+         color:var(--muted);cursor:pointer">
+    <input type="checkbox" name="maintenance" value="1"
+           {% if include_mt %}checked{% endif %}>
+    Hitung juga gangguan saat pemeliharaan
+  </label>
+  <button class="btn primary" type="submit">Tampilkan</button>
+</form>
+
+<div class="tally">
+  <div><div class="n" style="font-size:17px">{{ rows|length }}</div>
+       <div class="l">Pelanggan</div></div>
+  <div><div class="n {% if breaches %}down{% else %}up{% endif %}"
+            style="font-size:17px">{{ breaches }}</div>
+       <div class="l">Di bawah 99,5%</div></div>
+  <div><div class="n mono" style="font-size:17px">{{ window_fmt }}</div>
+       <div class="l">Periode dihitung</div></div>
+</div>
+
+{% if rows %}
+<div class="panel">
+  <table class="grid">
+    <thead><tr>
+      <th>Pelanggan</th><th style="width:150px">Perangkat</th>
+      <th style="width:90px">Gangguan</th><th style="width:120px">Total down</th>
+      <th style="width:110px">Uptime</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td><a href="{% url 'customer_detail' r.obj.id %}">{{ r.obj.name }}</a>
+          <span class="mono" style="color:var(--dim);font-size:11px">
+            {{ r.obj.service_id|default:"" }}</span></td>
+      <td class="mono" style="font-size:12px;color:var(--muted)">{{ r.obj.device.name }}</td>
+      <td class="mono" style="font-size:12px">{{ r.incidents }}</td>
+      <td class="mono" style="font-size:12px">{{ r.down_fmt }}</td>
+      <td class="mono" style="font-weight:600;
+          color:{% if r.breach %}var(--red){% else %}var(--green){% endif %}">
+          {{ r.uptime_fmt }}%</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="sub" style="padding:14px 0;font-size:12px;line-height:1.7">
+  Uptime dihitung dari gangguan <strong>major</strong> (link/sesi mati atau
+  traffic nol). Gangguan degradasi tidak mengurangi uptime.
+  {% if include_mt %}Gangguan saat pemeliharaan terjadwal ikut dihitung.
+  {% else %}Gangguan saat pemeliharaan terjadwal dikecualikan.{% endif %}
+  Gangguan yang tumpang tindih dihitung sekali.
+  {% if month == start|date:"n"|add:0 %}{% endif %}
+  Periode: {{ start|date:"d/m/Y H:i" }} – {{ end|date:"d/m/Y H:i" }}.
+</div>
+
+{% else %}
+<div class="panel"><div class="empty">
+  <h2>Belum ada pelanggan</h2>
+  <p>Daftarkan pelanggan dulu, laporan SLA akan terisi seiring berjalannya
+     monitoring.</p>
+  <a class="btn primary" href="/admin/monitor/customer/add/">Tambah pelanggan</a>
+</div></div>
+{% endif %}
+{% endblock %}

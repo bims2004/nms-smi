@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.urls import reverse
 from django.utils.html import format_html
 
-from .models import Alert, Customer, Device
+from .models import Alert, Customer, Device, MaintenanceWindow
 
 admin.site.site_header = "NMS — Kelola inventory"
 admin.site.site_title = "NMS"
@@ -13,8 +13,9 @@ admin.site.index_title = "Perangkat & pelanggan"
 @admin.register(Device)
 class DeviceAdmin(admin.ModelAdmin):
     list_display = ("name", "ip", "vendor", "poll_method", "enabled",
-                    "jumlah_pelanggan", "aksi")
-    list_filter = ("vendor", "poll_method", "enabled")
+                    "status", "jumlah_pelanggan", "aksi")
+    list_filter = ("vendor", "poll_method", "enabled", "status")
+    readonly_fields = ("status", "status_changed_at", "last_ok_at", "fail_count")
     search_fields = ("name", "ip")
     fieldsets = (
         (None, {"fields": ("name", "ip", "vendor", "poll_method", "enabled")}),
@@ -27,6 +28,10 @@ class DeviceAdmin(admin.ModelAdmin):
             "description": "Diisi kalau metode polling Mikrotik API. "
                            "Buat user read-only dulu: "
                            "<code>/user group add name=nms-ro policy=read,api</code>",
+        }),
+        ("Kesehatan perangkat", {
+            "fields": ("status", "status_changed_at", "last_ok_at", "fail_count"),
+            "description": "Diisi otomatis oleh collector.",
         }),
     )
 
@@ -43,8 +48,10 @@ class DeviceAdmin(admin.ModelAdmin):
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
     list_display = ("name", "service_id", "device", "monitor_type",
-                    "titik_monitor", "threshold_bps", "enabled", "status")
-    list_filter = ("status", "monitor_type", "enabled", "device")
+                    "titik_monitor", "threshold_bps", "baseline_enabled",
+                    "enabled", "status")
+    list_filter = ("status", "monitor_type", "enabled", "baseline_enabled",
+                   "device")
     search_fields = ("name", "service_id", "pppoe_username", "if_name")
     list_select_related = ("device",)
     readonly_fields = ("status", "status_changed_at")
@@ -58,6 +65,12 @@ class CustomerAdmin(admin.ModelAdmin):
                            "Belum tahu ifIndex? Buka Perangkat → Lihat interface.",
         }),
         ("Ambang alert", {"fields": ("threshold_bps",)}),
+        ("Deteksi degradasi", {
+            "fields": ("baseline_enabled", "baseline_drop_pct"),
+            "description": "Menangkap pelanggan yang masih hidup tapi "
+                           "traffic-nya jatuh jauh di bawah kebiasaannya. "
+                           "Butuh riwayat minimal beberapa minggu.",
+        }),
         ("Status terkini", {"fields": ("status", "status_changed_at")}),
     )
 
@@ -70,12 +83,46 @@ class CustomerAdmin(admin.ModelAdmin):
 
 @admin.register(Alert)
 class AlertAdmin(admin.ModelAdmin):
-    list_display = ("customer", "alert_type", "started_at", "resolved_at",
-                    "notified")
-    list_filter = ("alert_type", "notified")
-    search_fields = ("customer__name",)
-    list_select_related = ("customer",)
+    list_display = ("subject", "alert_type", "severity", "started_at",
+                    "resolved_at", "suppressed", "notified", "ack_by")
+    list_filter = ("alert_type", "severity", "notified", "suppressed")
+    search_fields = ("customer__name", "device__name")
+    list_select_related = ("customer", "device")
     date_hierarchy = "started_at"
+
+    @admin.display(description="Terkena")
+    def subject(self, obj):
+        return obj.subject
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(MaintenanceWindow)
+class MaintenanceWindowAdmin(admin.ModelAdmin):
+    list_display = ("name", "scope", "starts_at", "ends_at", "aktif",
+                    "created_by")
+    list_filter = ("device",)
+    search_fields = ("name", "note")
+    list_select_related = ("device", "customer")
+    fieldsets = (
+        (None, {"fields": ("name", "starts_at", "ends_at", "note")}),
+        ("Cakupan", {
+            "fields": ("device", "customer"),
+            "description": "Kosongkan keduanya untuk menahan alert "
+                           "SEMUA pelanggan. Isi salah satu untuk membatasi.",
+        }),
+    )
+
+    @admin.display(description="Aktif", boolean=True)
+    def aktif(self, obj):
+        return obj.is_active
+
+    @admin.display(description="Cakupan")
+    def scope(self, obj):
+        return obj.scope
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.created_by = request.user.get_username()
+        super().save_model(request, obj, form, change)

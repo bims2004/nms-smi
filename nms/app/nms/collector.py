@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 from . import config, db
 from .pollers.mikrotik import poll_pppoe_customers
+from .pollers.probe import probe_device
 from .pollers.snmp import poll_snmp_customers
 
 logging.basicConfig(
@@ -64,6 +65,30 @@ def compute_bps(customer_id: int, now: float, in_oct, out_oct):
     return int(d_in * 8 / dt), int(d_out * 8 / dt)
 
 
+def record_device_health(conn, device_id: int, ok: bool):
+    """Catat hasil polling perangkat.
+
+    Ini yang memungkinkan alerter membedakan 'perangkat mati' dari
+    'pelanggan mati'. Tanpa ini, satu switch mati tampak seperti
+    ratusan pelanggan down sekaligus.
+    """
+    with conn.cursor() as cur:
+        if ok:
+            cur.execute(
+                """
+                UPDATE devices
+                SET last_ok_at = now(), fail_count = 0
+                WHERE id = %s
+                """,
+                (device_id,),
+            )
+        else:
+            cur.execute(
+                "UPDATE devices SET fail_count = fail_count + 1 WHERE id = %s",
+                (device_id,),
+            )
+
+
 def run_cycle(conn):
     devices, cust_by_device = load_inventory(conn)
     now = time.time()
@@ -81,11 +106,18 @@ def run_cycle(conn):
         if pppoe_custs and dev["poll_method"] == "mikrotik_api":
             polled.update(poll_pppoe_customers(dev, pppoe_custs))
 
+        # Perangkat tanpa pelanggan tetap di-probe supaya kesehatannya terpantau
+        if not custs:
+            reachable = probe_device(dev)
+        else:
+            reachable = len(polled) > 0
+        record_device_health(conn, dev["id"], reachable)
+
         for c in custs:
             data = polled.get(c["id"])
             if data is None:
-                # Device tidak merespon: jangan tulis sample palsu.
-                # Alert engine akan menganggap data stale = unknown.
+                # Perangkat tidak merespon: jangan tulis sampel palsu.
+                # Alerter memperlakukan data basi sebagai 'tidak diketahui'.
                 continue
             in_bps, out_bps = compute_bps(
                 c["id"], now, data["in_octets"], data["out_octets"]

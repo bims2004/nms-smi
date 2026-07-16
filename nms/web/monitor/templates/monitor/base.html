@@ -81,7 +81,7 @@ h1{font-size:19px;font-weight:600;letter-spacing:-.02em;margin:0}
 
 /* ---- LED port: elemen khas halaman ini ---- */
 .led{width:9px;height:9px;border-radius:50%;background:var(--slate);
-  justify-self:center;position:relative;flex-shrink:0}
+  justify-self:center;position:relative;flex-shrink:0;display:inline-block}
 .led::after{content:"";position:absolute;inset:-4px;border-radius:50%;
   background:inherit;opacity:.24;filter:blur(3px)}
 .led.up{background:var(--green);animation:blink 2.4s ease-in-out infinite}
@@ -137,6 +137,12 @@ table.grid tr:hover td{background:var(--surface-2)}
   border:1px solid var(--hairline);color:var(--muted);white-space:nowrap}
 .tag.red{color:var(--red);border-color:rgba(216,72,63,.45)}
 .tag.green{color:var(--green);border-color:rgba(79,168,94,.45)}
+.tag.orange{color:var(--orange);border-color:rgba(224,129,60,.45)}
+.tag.blue{color:var(--blue);border-color:rgba(76,147,216,.45)}
+.btn-ack{padding:3px 9px;font-size:12px;border-radius:4px;cursor:pointer;
+  border:1px solid var(--hairline);background:var(--surface-2);
+  color:var(--text);font-family:var(--sans)}
+.btn-ack:hover{border-color:var(--blue)}
 
 footer.foot{color:var(--dim);font-size:11px;padding:26px 0 40px;font-family:var(--mono)}
 footer.foot .wrap{display:flex;gap:16px;flex-wrap:wrap}
@@ -164,16 +170,22 @@ footer.foot .wrap{display:flex;gap:16px;flex-wrap:wrap}
   <nav class="main">
     <a href="{% url 'dashboard' %}" class="{% if nav == 'dashboard' %}on{% endif %}">Pelanggan</a>
     <a href="{% url 'alert_list' %}" class="{% if nav == 'alerts' %}on{% endif %}">Gangguan</a>
-    <a href="/admin/monitor/device/" class="{% if nav == 'devices' %}on{% endif %}">Perangkat</a>
+    <a href="{% url 'device_list' %}" class="{% if nav == 'devices' %}on{% endif %}">Perangkat</a>
+    <a href="{% url 'sla_report' %}" class="{% if nav == 'sla' %}on{% endif %}">SLA</a>
     <a href="/admin/">Kelola</a>
     {% if user.is_authenticated %}<a href="/admin/logout/">Keluar</a>{% endif %}
   </nav>
 </div></div></header>
 
-<main class="wrap">{% block content %}{% endblock %}</main>
+<main class="wrap">
+{% if messages %}{% for m in messages %}
+<div class="msg" style="margin-top:16px;border-color:rgba(79,168,94,.5);
+     background:rgba(79,168,94,.08)">{{ m }}</div>
+{% endfor %}{% endif %}
+{% block content %}{% endblock %}</main>
 
 <footer class="foot"><div class="wrap">
-  <span>NMS Fase 2</span>
+  <span>NMS</span>
   <span>Zona waktu: Asia/Jakarta</span>
 </div></footer>
 {% block script %}{% endblock %}

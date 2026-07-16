@@ -243,3 +243,105 @@ pelanggannya yang pasti down. Cek collector dan reachability perangkat dulu.
 - Query time-series memakai `time_bucket()` dari TimescaleDB
 - Halaman "Lihat interface" melakukan SNMP walk dari container `web`, jadi ACL
   perangkat harus mengizinkan IP server yang sama seperti collector
+
+---
+
+# Fase 3 — Kualitas alert & laporan SLA
+
+Empat penambahan, semuanya menempel di struktur yang sudah ada.
+
+## 1. Perangkat ikut dipantau
+
+Sebelumnya, kalau satu switch mati, NMS tidak mengirim alert apa pun —
+pelanggannya hanya berubah jadi "tanpa data". Sekarang collector mencatat
+kesehatan tiap perangkat, dan:
+
+- Perangkat yang gagal di-poll `DEVICE_FAIL_THRESHOLD` kali berturut-turut
+  menghasilkan **satu** alert `device_down`.
+- Selama perangkat down, status pelanggan di bawahnya **berhenti dinilai**.
+  Satu switch mati tidak lagi terlihat seperti ratusan pelanggan down.
+- Saat perangkat pulih, evaluasi pelanggan berjalan lagi seperti biasa.
+
+Lihat di halaman **Perangkat**.
+
+## 2. Jadwal pemeliharaan
+
+Kelola → Jadwal pemeliharaan → Tambah. Selama jendela aktif:
+
+- Gangguan **tetap dicatat** (jadi riwayatnya tidak hilang),
+- tapi **tidak dikirim** ke Telegram,
+- dan ditandai `suppressed` sehingga bisa dikecualikan dari laporan SLA.
+
+Cakupan bisa dibatasi ke satu perangkat, satu pelanggan, atau dikosongkan
+keduanya untuk menahan alert semua pelanggan.
+
+## 3. Deteksi degradasi (baseline)
+
+Aturan Fase 1 hanya menangkap traffic yang benar-benar nol. Pelanggan yang
+biasanya 300 Mbps lalu turun jadi 20 Mbps tetap dianggap normal — padahal
+itu gangguan nyata.
+
+Aktifkan per pelanggan: Kelola → Pelanggan → Deteksi degradasi.
+
+Cara kerjanya: median traffic tiap kombinasi (hari, jam) waktu lokal selama
+28 hari terakhir jadi baseline. Traffic malam Minggu tidak dibandingkan
+dengan Senin pagi. Kalau traffic turun lebih dari `baseline_drop_pct` di
+bawah baseline jam tersebut, terbit alert `traffic_degraded` dengan severity
+**minor** (tidak mengurangi uptime SLA).
+
+Batasannya, dan ini penting:
+
+- Butuh riwayat minimal beberapa minggu sebelum baseline bisa dipercaya
+  (minimal 20 sampel per kombinasi hari-jam).
+- Baseline di bawah 1 Mbps diabaikan — pelanggan yang memang sepi tidak
+  akan memicu alert.
+- **Kurang cocok untuk pelanggan rumahan** yang pola pemakaiannya acak.
+  Paling berguna untuk dedicated/korporat yang polanya berulang.
+
+Baseline dihitung ulang tiap `BASELINE_REFRESH_HOURS` jam.
+
+## 4. Eskalasi & penandaan penanganan
+
+Gangguan **major** yang belum ditandai ditangani dan belum pulih setelah
+`ESCALATION_MINUTES` akan dikirim ulang ke grup sebagai pengingat, sekali saja.
+
+Tombol **Tandai ditangani** di halaman Gangguan menghentikan pengingat itu.
+Gangguannya sendiri tetap terbuka sampai traffic benar-benar pulih — ack
+hanya berarti "sudah ada yang pegang", bukan "sudah beres".
+
+Isi `ESCALATION_MINUTES=0` untuk mematikan fitur ini.
+
+## 5. Laporan SLA
+
+Halaman **SLA**: pilih bulan, lihat uptime tiap pelanggan, unduh CSV
+(siap dibuka di Excel, sudah ber-BOM UTF-8).
+
+Cara hitung:
+
+- Hanya gangguan **major** yang mengurangi uptime. Degradasi tidak.
+- Gangguan yang tumpang tindih dihitung sekali, tidak dobel.
+- Gangguan saat pemeliharaan terjadwal dikecualikan secara default; ada
+  kotak centang untuk memasukkannya.
+- Bulan berjalan dihitung sampai saat ini, bukan sampai akhir bulan —
+  supaya uptime bulan ini tidak selalu terlihat bagus.
+
+Angka ini dihitung dari data polling NMS sendiri. Kalau NMS sempat mati,
+periode itu terhitung sebagai "tidak ada gangguan". Untuk klaim SLA yang
+mengikat kontrak, cocokkan dulu dengan catatan tiket gangguan.
+
+## Menerapkan Fase 3 ke instalasi yang sudah jalan
+
+File di `db/init/` hanya dijalankan Postgres saat volume database masih
+kosong. Untuk database yang sudah berisi data, jalankan:
+
+```bash
+git pull
+./scripts/upgrade-db.sh        # backup otomatis, lalu terapkan perubahan schema
+docker compose up -d --build
+```
+
+Script itu membuat backup terkompresi dulu sebelum mengubah apa pun, dan
+semua migrasi ditulis idempotent — aman dijalankan berulang.
+
+Instalasi baru tidak perlu langkah ini; `docker compose up -d --build`
+sudah cukup.

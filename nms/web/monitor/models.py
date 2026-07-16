@@ -30,6 +30,19 @@ STATUS_CHOICES = [
     ("unknown", "Belum diketahui"),
 ]
 
+SEVERITY_CHOICES = [
+    ("major", "Major — layanan mati"),
+    ("minor", "Minor — layanan menurun"),
+]
+
+ALERT_TYPE_LABEL = {
+    "link_down": "Link down",
+    "session_down": "Sesi PPPoE putus",
+    "traffic_zero": "Traffic nol",
+    "traffic_degraded": "Traffic turun drastis",
+    "device_down": "Perangkat tidak merespon",
+}
+
 
 class Device(models.Model):
     name = models.CharField("Nama perangkat", max_length=200)
@@ -55,6 +68,14 @@ class Device(models.Model):
     )
     api_port = models.IntegerField("Port API", blank=True, null=True, default=8728)
     enabled = models.BooleanField("Aktif", default=True)
+    status = models.CharField("Status", max_length=20, default="unknown",
+                              editable=False)
+    status_changed_at = models.DateTimeField("Status berubah", blank=True,
+                                             null=True, editable=False)
+    last_ok_at = models.DateTimeField("Terakhir merespon", blank=True,
+                                      null=True, editable=False)
+    fail_count = models.IntegerField("Gagal berturut-turut", default=0,
+                                     editable=False)
 
     class Meta:
         managed = False
@@ -106,6 +127,17 @@ class Customer(models.Model):
         "Ambang traffic (bps)", default=1000,
         help_text="Traffic in+out di bawah nilai ini dihitung sebagai down.",
     )
+    baseline_enabled = models.BooleanField(
+        "Deteksi degradasi", default=False,
+        help_text="Bandingkan traffic dengan kebiasaan pelanggan ini pada "
+                  "hari & jam yang sama. Cocok untuk dedicated; "
+                  "kurang cocok untuk pelanggan rumahan yang polanya acak.",
+    )
+    baseline_drop_pct = models.IntegerField(
+        "Ambang penurunan (%)", default=80,
+        help_text="Alert kalau traffic turun lebih dari sekian persen "
+                  "dibanding kebiasaannya.",
+    )
     enabled = models.BooleanField("Aktif", default=True)
     status = models.CharField(
         "Status", max_length=20, choices=STATUS_CHOICES,
@@ -150,12 +182,23 @@ class Customer(models.Model):
 class Alert(models.Model):
     customer = models.ForeignKey(
         Customer, on_delete=models.CASCADE, db_column="customer_id",
-        verbose_name="Pelanggan",
+        verbose_name="Pelanggan", blank=True, null=True,
+    )
+    device = models.ForeignKey(
+        Device, on_delete=models.CASCADE, db_column="device_id",
+        verbose_name="Perangkat", blank=True, null=True,
     )
     alert_type = models.CharField("Jenis", max_length=50)
+    severity = models.CharField("Tingkat", max_length=20,
+                                choices=SEVERITY_CHOICES, default="major")
     started_at = models.DateTimeField("Mulai")
     resolved_at = models.DateTimeField("Pulih", blank=True, null=True)
     notified = models.BooleanField("Terkirim ke Telegram", default=False)
+    suppressed = models.BooleanField("Ditahan (pemeliharaan)", default=False)
+    escalated_at = models.DateTimeField("Dieskalasi", blank=True, null=True)
+    ack_by = models.CharField("Ditangani oleh", max_length=150, blank=True,
+                              null=True)
+    ack_at = models.DateTimeField("Ditangani pada", blank=True, null=True)
 
     class Meta:
         managed = False
@@ -165,10 +208,72 @@ class Alert(models.Model):
         ordering = ["-started_at"]
 
     def __str__(self):
-        return f"{self.customer_id} — {self.alert_type}"
+        return f"{self.subject} — {self.alert_type}"
+
+    @property
+    def subject(self):
+        """Nama yang terkena gangguan: pelanggan, atau perangkat."""
+        if self.customer_id:
+            return self.customer.name
+        if self.device_id:
+            return self.device.name
+        return "—"
 
     @property
     def duration(self):
         if self.resolved_at:
             return self.resolved_at - self.started_at
         return None
+
+
+class MaintenanceWindow(models.Model):
+    """Jadwal pemeliharaan — gangguan tetap dicatat tapi tidak dikirim ke
+    Telegram, dan bisa dikecualikan dari laporan SLA."""
+    name = models.CharField("Nama pekerjaan", max_length=200)
+    starts_at = models.DateTimeField("Mulai")
+    ends_at = models.DateTimeField("Selesai")
+    device = models.ForeignKey(
+        Device, on_delete=models.CASCADE, db_column="device_id",
+        verbose_name="Perangkat", blank=True, null=True,
+        help_text="Kosongkan kalau tidak dibatasi ke satu perangkat.",
+    )
+    customer = models.ForeignKey(
+        Customer, on_delete=models.CASCADE, db_column="customer_id",
+        verbose_name="Pelanggan", blank=True, null=True,
+        help_text="Kosongkan kalau tidak dibatasi ke satu pelanggan.",
+    )
+    note = models.TextField("Catatan", blank=True, null=True)
+    created_by = models.CharField("Dibuat oleh", max_length=150, blank=True,
+                                  null=True, editable=False)
+    # Kolomnya NOT NULL DEFAULT now() di SQL; auto_now_add membuat Django
+    # ikut mengisinya, bukan mengirim NULL.
+    created_at = models.DateTimeField("Dibuat", auto_now_add=True)
+
+    class Meta:
+        managed = False
+        db_table = "maintenance_windows"
+        verbose_name = "Jadwal pemeliharaan"
+        verbose_name_plural = "Jadwal pemeliharaan"
+        ordering = ["-starts_at"]
+
+    def __str__(self):
+        return self.name
+
+    def clean(self):
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValidationError(
+                {"ends_at": "Waktu selesai harus setelah waktu mulai."}
+            )
+
+    @property
+    def scope(self):
+        if self.customer_id:
+            return f"Pelanggan: {self.customer.name}"
+        if self.device_id:
+            return f"Perangkat: {self.device.name}"
+        return "Semua pelanggan"
+
+    @property
+    def is_active(self):
+        from django.utils import timezone as tz
+        return self.starts_at <= tz.now() <= self.ends_at
