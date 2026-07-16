@@ -1,0 +1,89 @@
+{% extends "monitor/base.html" %}
+{% block title %}Interface {{ d.name }} — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Interface di {{ d.name }}</h1>
+  <span class="sub mono">{{ d.ip }} · {{ d.get_poll_method_display }}</span>
+  <span class="sub" style="margin-left:auto">
+    <a href="/admin/monitor/device/{{ d.id }}/change/">Ubah perangkat</a>
+  </span>
+</div>
+
+{% if error %}
+<div class="msg error">{{ error }}</div>
+{% endif %}
+
+{% if not scanned %}
+<div class="panel"><div class="empty">
+  <h2>Ambil daftar {% if kind == 'snmp' %}interface{% else %}sesi PPPoE{% endif %}</h2>
+  <p>{% if kind == 'snmp' %}Server akan membaca IF-MIB dari {{ d.ip }} dan
+     menampilkan ifIndex tiap port — angka inilah yang dipakai saat
+     mendaftarkan pelanggan dedicated.
+     {% else %}Server akan membaca sesi PPPoE yang sedang aktif di {{ d.ip }}
+     lewat API, supaya username-nya tinggal disalin.{% endif %}</p>
+  <a class="btn primary" href="?scan=1">Ambil sekarang</a>
+</div></div>
+
+{% elif rows %}
+<div class="sub" style="margin-bottom:10px">
+  {{ rows|length }} entri terbaca. Salin nilainya ke form pelanggan.
+</div>
+<div class="panel">
+  <table class="grid">
+    {% if kind == 'snmp' %}
+    <thead><tr><th style="width:80px">ifIndex</th><th>Nama</th>
+      <th>Deskripsi</th><th style="width:80px">Link</th>
+      <th style="width:150px"></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="mono" style="font-weight:600;color:var(--blue)">{{ r.if_index }}</td>
+      <td class="mono">{{ r.if_name }}</td>
+      <td style="color:var(--muted)">{{ r.alias|default:"—" }}</td>
+      <td>{% if r.oper_up %}<span class="tag green">up</span>
+          {% else %}<span class="tag">down</span>{% endif %}</td>
+      <td>{% if r.used %}<span class="tag">sudah dipakai</span>
+          {% else %}
+          <a class="btn" style="padding:3px 9px;font-size:12px"
+             href="/admin/monitor/customer/add/?device={{ d.id }}&monitor_type=snmp_if&if_index={{ r.if_index }}&if_name={{ r.if_name|urlencode }}">Daftarkan</a>
+          {% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+
+    {% else %}
+    <thead><tr><th>Username</th><th>IP</th><th>Uptime</th>
+      <th>Caller ID</th><th style="width:150px"></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="mono" style="font-weight:600;color:var(--blue)">{{ r.username }}</td>
+      <td class="mono" style="color:var(--muted)">{{ r.address|default:"—" }}</td>
+      <td class="mono" style="color:var(--muted)">{{ r.uptime|default:"—" }}</td>
+      <td class="mono" style="color:var(--dim);font-size:11px">{{ r.caller_id|default:"—" }}</td>
+      <td>{% if r.used %}<span class="tag">sudah dipakai</span>
+          {% else %}
+          <a class="btn" style="padding:3px 9px;font-size:12px"
+             href="/admin/monitor/customer/add/?device={{ d.id }}&monitor_type=pppoe&pppoe_username={{ r.username|urlencode }}">Daftarkan</a>
+          {% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+    {% endif %}
+  </table>
+</div>
+<div class="sub" style="padding:12px 0">
+  <a href="?scan=1">Ambil ulang</a>
+  {% if kind != 'snmp' %} · Hanya sesi yang sedang aktif yang terlihat di sini.{% endif %}
+</div>
+
+{% else %}
+<div class="panel"><div class="empty">
+  <h2>Tidak ada yang terbaca</h2>
+  <p>{% if kind == 'snmp' %}Perangkat menjawab tapi daftar interface kosong.
+     {% else %}Tidak ada sesi PPPoE yang sedang aktif di perangkat ini.{% endif %}</p>
+  <a class="btn" href="?scan=1">Coba lagi</a>
+</div></div>
+{% endif %}
+{% endblock %}

@@ -69,6 +69,18 @@ check_env() {
     else
         ok "POSTGRES_PASSWORD sudah diganti"
     fi
+
+    if [[ -z "${DJANGO_SECRET_KEY:-}" || "${DJANGO_SECRET_KEY}" == *"ganti-dengan"* ]]; then
+        warn "DJANGO_SECRET_KEY masih placeholder — buat acak: openssl rand -base64 48"
+    else
+        ok "DJANGO_SECRET_KEY sudah diisi"
+    fi
+
+    if [[ "${DJANGO_ALLOWED_HOSTS:-*}" == "*" ]]; then
+        warn "DJANGO_ALLOWED_HOSTS masih '*' — sebaiknya diisi IP/hostname server"
+    else
+        ok "DJANGO_ALLOWED_HOSTS dibatasi"
+    fi
 }
 
 test_telegram() {

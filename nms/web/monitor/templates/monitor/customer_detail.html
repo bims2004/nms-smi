@@ -1,0 +1,123 @@
+{% extends "monitor/base.html" %}
+{% load l10n %}
+{% block title %}{{ c.name }} — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ c.name }}</h1>
+  <span class="sub mono">{{ c.service_id|default:"tanpa ID" }}</span>
+  <span class="sub" style="margin-left:auto">
+    <a href="{% url 'dashboard' %}">← Semua pelanggan</a> ·
+    <a href="/admin/monitor/customer/{{ c.id }}/change/">Ubah</a>
+  </span>
+</div>
+
+<div class="tally">
+  <div>
+    <div class="n {% if c.status == 'down' %}down{% elif c.status == 'up' %}up{% else %}unknown{% endif %}"
+         style="font-size:17px">{{ c.get_status_display }}</div>
+    <div class="l">Status</div>
+  </div>
+  <div><div class="n" style="font-size:17px">{{ uptime }}%</div>
+       <div class="l">Uptime {{ hours }} jam</div></div>
+  <div><div class="n" style="font-size:17px">{{ chart.peak_in|default:"—" }}</div>
+       <div class="l">Puncak in</div></div>
+  <div><div class="n" style="font-size:17px">{{ chart.peak_out|default:"—" }}</div>
+       <div class="l">Puncak out</div></div>
+</div>
+
+<div class="panel" style="margin-bottom:18px">
+  <div class="panel-head" style="display:flex;justify-content:space-between;
+       align-items:center;height:38px">
+    <span>Traffic</span>
+    <span style="display:flex;gap:10px;text-transform:none;letter-spacing:0">
+      {% for h in "6,24,168"|slice:":0" %}{% endfor %}
+      <a href="?hours=1" {% if hours == 1 %}style="color:var(--text)"{% endif %}>1j</a>
+      <a href="?hours=6" {% if hours == 6 %}style="color:var(--text)"{% endif %}>6j</a>
+      <a href="?hours=24" {% if hours == 24 %}style="color:var(--text)"{% endif %}>24j</a>
+      <a href="?hours=168" {% if hours == 168 %}style="color:var(--text)"{% endif %}>7h</a>
+    </span>
+  </div>
+
+  {% if chart %}
+  <div style="padding:14px 14px 8px">
+    {% localize off %}
+    <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" style="width:100%;height:auto"
+         role="img" aria-label="Grafik traffic {{ c.name }}">
+      {% for g in chart.grid %}
+      <line x1="{{ chart.pad_l }}" y1="{{ g.y }}"
+            x2="{{ chart.width|add:'-12' }}" y2="{{ g.y }}"
+            stroke="#26374A" stroke-width="1"/>
+      <text x="{{ chart.pad_l|add:'-8' }}" y="{{ g.y_label }}" text-anchor="end"
+            fill="#4E6178" font-size="10"
+            font-family="IBM Plex Mono, monospace">{{ g.label }}</text>
+      {% endfor %}
+      {% for l in chart.labels %}
+      <text x="{{ l.x }}" y="{{ chart.height|add:'-6' }}" text-anchor="{{ l.anchor }}"
+            fill="#4E6178" font-size="10"
+            font-family="IBM Plex Mono, monospace">{{ l.t }}</text>
+      {% endfor %}
+      <path d="{{ chart.out_path }}" fill="none" stroke="#E0813C" stroke-width="1.5"
+            stroke-linejoin="round"/>
+      <path d="{{ chart.in_path }}" fill="none" stroke="#4C93D8" stroke-width="1.5"
+            stroke-linejoin="round"/>
+    </svg>
+    {% endlocalize %}
+    <div class="mono" style="font-size:11px;color:var(--muted);
+         display:flex;gap:16px;padding:4px 0 6px">
+      <span><span style="color:#4C93D8">━</span> in (ke pelanggan)</span>
+      <span><span style="color:#E0813C">━</span> out (dari pelanggan)</span>
+    </div>
+  </div>
+  {% else %}
+  <div class="empty"><h2>Belum ada data traffic</h2>
+    <p>Collector belum menghasilkan sampel untuk pelanggan ini dalam
+       {{ hours }} jam terakhir. Kalau baru saja ditambahkan, tunggu
+       satu-dua siklus polling.</p></div>
+  {% endif %}
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px" class="cols">
+  <div class="panel">
+    <div class="panel-head" style="display:block;line-height:34px">Konfigurasi</div>
+    <table class="grid">
+      <tr><td style="color:var(--muted);width:44%">Perangkat</td>
+          <td class="mono">{{ c.device.name }}<br>
+              <span style="color:var(--dim)">{{ c.device.ip }}</span></td></tr>
+      <tr><td style="color:var(--muted)">Tipe</td>
+          <td>{{ c.get_monitor_type_display }}</td></tr>
+      <tr><td style="color:var(--muted)">Titik monitor</td>
+          <td class="mono">{% if c.monitor_type == 'snmp_if' %}
+              {{ c.if_name|default:"—" }} (ifIndex {{ c.if_index }})
+              {% else %}{{ c.pppoe_username }}{% endif %}</td></tr>
+      <tr><td style="color:var(--muted)">Ambang alert</td>
+          <td class="mono">{{ c.threshold_bps }} bps</td></tr>
+      <tr><td style="color:var(--muted)">Status berubah</td>
+          <td class="mono">{{ c.status_changed_at|date:"d/m/Y H:i:s"|default:"—" }}</td></tr>
+    </table>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head" style="display:block;line-height:34px">Riwayat gangguan</div>
+    {% if alerts %}
+    <table class="grid">
+      <thead><tr><th>Jenis</th><th>Mulai</th><th>Durasi</th></tr></thead>
+      <tbody>
+      {% for a in alerts %}
+      <tr>
+        <td><span class="tag {% if not a.resolved_at %}red{% else %}green{% endif %}">{{ a.alert_type }}</span></td>
+        <td class="mono" style="font-size:12px">{{ a.started_at|date:"d/m H:i" }}</td>
+        <td class="mono" style="font-size:12px">{{ a.dur }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding:26px;text-align:center;color:var(--muted);font-size:13px">
+      Belum pernah ada gangguan tercatat.</div>
+    {% endif %}
+  </div>
+</div>
+
+<style>@media(max-width:880px){.cols{grid-template-columns:1fr!important}}</style>
+{% endblock %}

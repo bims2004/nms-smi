@@ -147,7 +147,7 @@ GROUP BY bucket ORDER BY bucket;
 
 ## Roadmap
 
-- **Fase 2:** Dashboard Django + grafik realtime (websocket) + status board.
+- **Fase 2:** Dashboard Django — selesai, lihat bagian di bawah.
 - **Fase 3:** Baseline anomaly detection, eskalasi, laporan SLA/uptime.
 
 ## Preflight check
@@ -163,3 +163,83 @@ Sebelum `docker compose up`, verifikasi environment & reachability device:
 
 Mode `snmp` sekaligus menampilkan daftar ifIndex device — pakai ini untuk
 mengisi kolom `if_index` di tabel `customers`.
+
+---
+
+# Fase 2 — Dashboard web
+
+Django dashboard untuk mengelola inventory lewat form (bukan SQL manual) dan
+memantau status pelanggan secara langsung.
+
+Dashboard memakai tabel yang **sama persis** dengan collector/alerter. Semua
+model Django dibuat `managed = False`, jadi `migrate` tidak pernah mengubah
+tabel `devices`, `customers`, `traffic_samples`, atau `alerts`. Schema tetap
+dimiliki `db/init/01_schema.sql`.
+
+## Akses
+
+```
+http://<ip-server>:8000
+```
+
+Buat user login pertama:
+
+```bash
+docker compose exec web python manage.py createsuperuser
+```
+
+## Halaman
+
+| Halaman | Isi |
+|---|---|
+| **Pelanggan** (`/`) | Status board semua pelanggan. LED hijau/merah, traffic in/out, sparkline 1 jam. Auto-refresh 20 detik |
+| **Detail pelanggan** | Grafik traffic 1j/6j/24j/7h, uptime, konfigurasi, riwayat gangguan |
+| **Gangguan** (`/gangguan/`) | Daftar gangguan berlangsung & riwayat, termasuk status kirim Telegram |
+| **Kelola** (`/admin/`) | Form CRUD perangkat & pelanggan |
+| **Lihat interface** | Baca daftar interface/sesi PPPoE langsung dari perangkat |
+
+## Alur mendaftarkan pelanggan
+
+1. **Kelola → Perangkat → Tambah** — isi nama, IP management, vendor, metode
+   polling. SNMP butuh community; Mikrotik API butuh user read-only.
+2. **Perangkat → Lihat interface → Ambil sekarang** — server membaca IF-MIB
+   (atau `/ppp/active` untuk Mikrotik) dan menampilkan ifIndex tiap port.
+   Ini menggantikan `snmpwalk` manual.
+3. Klik **Daftarkan** di baris yang sesuai — form pelanggan terbuka dengan
+   perangkat, tipe, dan ifIndex sudah terisi.
+4. Lengkapi nama pelanggan, ID layanan, ambang traffic. Simpan.
+5. Collector mengambil sampel pada siklus berikutnya (default 60 detik).
+
+Form menolak kombinasi yang tidak valid, misalnya monitoring PPPoE yang
+diarahkan ke perangkat SNMP, atau interface fisik tanpa ifIndex.
+
+## Arti warna LED
+
+| LED | Keadaan |
+|---|---|
+| Hijau | Traffic normal di atas ambang |
+| Merah | Down — link/sesi mati atau traffic di bawah ambang |
+| Oranye | Tidak ada sampel 15 menit terakhir (collector atau perangkat bermasalah) |
+| Abu | Belum ada keputusan, atau pelanggan dinonaktifkan |
+
+Oranye berbeda dari merah: itu berarti NMS-nya yang tidak dapat data, bukan
+pelanggannya yang pasti down. Cek collector dan reachability perangkat dulu.
+
+## Keamanan
+
+- `DJANGO_SECRET_KEY` wajib diganti: `openssl rand -base64 48`
+- `DJANGO_DEBUG=0` di produksi (default sudah 0)
+- Isi `DJANGO_ALLOWED_HOSTS` dengan IP/hostname server, jangan biarkan `*`
+- Password API Mikrotik tersimpan plaintext di kolom `api_password` — sama
+  seperti sebelumnya di SQL. Batasi akses database dan pakai user API
+  read-only, jangan admin
+- Kalau ditaruh di belakang reverse proxy, set `WEB_BIND=127.0.0.1` dan isi
+  `DJANGO_CSRF_TRUSTED_ORIGINS`
+
+## Catatan teknis
+
+- Grafik dan sparkline dirender sebagai SVG di server — tidak ada library
+  chart di browser, jadi tetap jalan di jaringan management yang terisolasi
+- Query time-series memakai `time_bucket()` dari TimescaleDB
+- Halaman "Lihat interface" melakukan SNMP walk dari container `web`, jadi ACL
+  perangkat harus mengizinkan IP server yang sama seperti collector

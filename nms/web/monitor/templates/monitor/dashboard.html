@@ -1,0 +1,110 @@
+{% extends "monitor/base.html" %}
+{% block title %}Pelanggan — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Status pelanggan</h1>
+  <span class="sub mono" id="stamp">memuat…</span>
+  <span class="sub" style="margin-left:auto">
+    {{ device_count }} perangkat aktif ·
+    <a href="/admin/monitor/customer/add/">Tambah pelanggan</a>
+  </span>
+</div>
+
+{% if rows %}
+<div class="tally">
+  <div><div class="n down" data-c="down">{{ counts.down }}</div><div class="l">Down</div></div>
+  <div><div class="n stale" data-c="stale">{{ counts.stale }}</div><div class="l">Tanpa data</div></div>
+  <div><div class="n unknown" data-c="unknown">{{ counts.unknown }}</div><div class="l">Belum pasti</div></div>
+  <div><div class="n up" data-c="up">{{ counts.up }}</div><div class="l">Normal</div></div>
+  <div><div class="n" data-c="disabled" style="color:var(--dim)">{{ counts.disabled }}</div><div class="l">Nonaktif</div></div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <span></span><span>Pelanggan</span><span>Titik monitor</span>
+    <span style="text-align:right">In</span><span style="text-align:right">Out</span>
+    <span>1 jam terakhir</span><span style="text-align:right">Keterangan</span>
+  </div>
+
+  {% for r in rows %}
+  <div class="strip {% if r.state == 'down' %}is-down{% endif %}{% if r.state == 'disabled' %}is-disabled{% endif %}"
+       data-row="{{ r.obj.id }}">
+    <span class="led {{ r.state }}" title="{{ r.state }}"></span>
+
+    <div class="cust">
+      <a href="{% url 'customer_detail' r.obj.id %}">{{ r.obj.name }}</a>
+      <span class="sid">{{ r.obj.service_id|default:"tanpa ID" }}</span>
+    </div>
+
+    <div class="port">
+      {{ r.port }}
+      <span class="dev">{{ r.obj.device.name }}</span>
+    </div>
+
+    <div class="bps" data-f="in" data-l="in">{{ r.in_bps }}</div>
+    <div class="bps" data-f="out" data-l="out">{{ r.out_bps }}</div>
+
+    <div class="sparkcell">{{ r.spark|safe }}</div>
+
+    <div class="note {% if r.state == 'down' %}down{% elif r.state == 'stale' %}stale{% else %}muted{% endif %}"
+         data-f="note">
+      {% if r.state == 'down' %}down {{ r.down_for }}
+      {% elif r.state == 'stale' %}tidak ada data
+      {% elif r.state == 'disabled' %}nonaktif
+      {% elif r.state == 'unknown' %}menunggu sampel
+      {% else %}normal{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="panel"><div class="empty">
+  <h2>Belum ada pelanggan yang dimonitor</h2>
+  <p>Daftarkan perangkat dulu (switch atau Mikrotik), lalu tambahkan
+     pelanggan dan titik monitornya. Collector akan mulai mengambil
+     traffic pada siklus berikutnya.</p>
+  <a class="btn primary" href="/admin/monitor/device/add/">Tambah perangkat</a>
+  <a class="btn" href="/admin/monitor/customer/add/">Tambah pelanggan</a>
+</div></div>
+{% endif %}
+{% endblock %}
+
+{% block script %}
+<script>
+(function(){
+  var stamp = document.getElementById('stamp');
+  function refresh(){
+    fetch('{% url "status_json" %}', {headers:{'X-Requested-With':'fetch'}})
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function(d){
+        for (var k in d.counts){
+          var el = document.querySelector('[data-c="'+k+'"]');
+          if (el) el.textContent = d.counts[k];
+        }
+        d.rows.forEach(function(row){
+          var el = document.querySelector('[data-row="'+row.id+'"]');
+          if (!el) return;
+          var led = el.querySelector('.led');
+          led.className = 'led ' + row.state;
+          el.classList.toggle('is-down', row.state === 'down');
+          el.querySelector('[data-f="in"]').textContent = row.in_bps;
+          el.querySelector('[data-f="out"]').textContent = row.out_bps;
+          var note = el.querySelector('[data-f="note"]');
+          note.className = 'note ' + (row.state === 'down' ? 'down'
+            : row.state === 'stale' ? 'stale' : 'muted');
+          note.textContent = row.state === 'down' ? 'down ' + row.down_for
+            : row.state === 'stale' ? 'tidak ada data'
+            : row.state === 'disabled' ? 'nonaktif'
+            : row.state === 'unknown' ? 'menunggu sampel' : 'normal';
+        });
+        stamp.textContent = 'diperbarui ' + d.updated;
+      })
+      .catch(function(){ stamp.textContent = 'gagal memuat — mencoba lagi'; });
+  }
+  refresh();
+  setInterval(refresh, 20000);
+})();
+</script>
+{% endblock %}

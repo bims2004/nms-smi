@@ -1,0 +1,47 @@
+{% extends "monitor/base.html" %}
+{% block title %}Gangguan — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Gangguan</h1>
+  <span class="sub" style="margin-left:auto">
+    <a href="?show=open" {% if show == 'open' %}style="color:var(--text)"{% endif %}>Sedang berlangsung</a> ·
+    <a href="?show=all" {% if show == 'all' %}style="color:var(--text)"{% endif %}>Semua riwayat</a>
+  </span>
+</div>
+
+{% if alerts %}
+<div class="panel">
+  <table class="grid">
+    <thead><tr>
+      <th>Pelanggan</th><th style="width:130px">Jenis</th>
+      <th style="width:140px">Mulai</th><th style="width:140px">Pulih</th>
+      <th style="width:90px">Durasi</th><th style="width:80px">Telegram</th>
+    </tr></thead>
+    <tbody>
+    {% for a in alerts %}
+    <tr>
+      <td><a href="{% url 'customer_detail' a.customer_id %}">{{ a.customer.name }}</a>
+          <span class="mono" style="color:var(--dim);font-size:11px">
+            {{ a.customer.service_id|default:"" }}</span></td>
+      <td><span class="tag {% if not a.resolved_at %}red{% else %}green{% endif %}">{{ a.alert_type }}</span></td>
+      <td class="mono" style="font-size:12px">{{ a.started_at|date:"d/m/Y H:i" }}</td>
+      <td class="mono" style="font-size:12px;color:var(--muted)">
+          {{ a.resolved_at|date:"d/m/Y H:i"|default:"—" }}</td>
+      <td class="mono" style="font-size:12px">{{ a.dur }}</td>
+      <td>{% if a.notified %}<span class="tag green">terkirim</span>
+          {% else %}<span class="tag red">gagal</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="panel"><div class="empty">
+  <h2>{% if show == 'open' %}Tidak ada gangguan berlangsung{% else %}Belum ada riwayat gangguan{% endif %}</h2>
+  <p>{% if show == 'open' %}Semua pelanggan yang dimonitor sedang normal.
+     {% else %}Belum ada gangguan yang tercatat sejak sistem berjalan.{% endif %}</p>
+  {% if show == 'open' %}<a class="btn" href="?show=all">Lihat semua riwayat</a>{% endif %}
+</div></div>
+{% endif %}
+{% endblock %}
