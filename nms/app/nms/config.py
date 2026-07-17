@@ -9,6 +9,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # Database
 DB_HOST = os.environ.get("DB_HOST", "db")
 DB_PORT = _int("DB_PORT", 5432)
@@ -45,6 +52,22 @@ BASELINE_REFRESH_HOURS = _int("BASELINE_REFRESH_HOURS", 6)
 # SNMP_TIMEOUT x (retries+1); tanpa paralel, beberapa perangkat mati sekaligus
 # membuat siklus meleset dari POLL_INTERVAL. Naikkan kalau perangkatnya banyak.
 POLL_WORKERS = _int("POLL_WORKERS", 8)
+
+# --- Korelasi ODP ---
+# ODP tidak punya perangkat aktif di dalamnya — cuma splitter pasif. Tidak
+# bisa di-ping. Satu-satunya bukti ODP bermasalah adalah pelanggan di
+# bawahnya mati BERSAMAAN.
+#
+# Berapa pelanggan minimal harus mati sebelum ODP dituduh. Di bawah ini
+# buktinya terlalu lemah: 2 dari 2 pelanggan mati bisa saja kebetulan.
+ODP_MIN_DOWN = _int("ODP_MIN_DOWN", 3)
+
+# Berapa bagian pelanggan ODP yang harus mati. 0.75 berarti 3 dari 4.
+# Dinaikkan = lebih jarang salah tuduh, tapi ODP yang setengah mati terlewat.
+# Diturunkan = lebih peka, tapi beberapa pelanggan yang kebetulan mati
+# bersamaan bisa memicu tuduhan palsu dan mengirim teknisi ke lapangan
+# untuk sesuatu yang tidak ada.
+ODP_DOWN_RATIO = _float("ODP_DOWN_RATIO", 0.75)
 
 # URL yang di-ping tiap siklus sebagai bukti NMS masih hidup (dead man's
 # switch). Kalau ping berhenti, layanan di seberang yang memberi tahu — karena

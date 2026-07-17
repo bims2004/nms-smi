@@ -29,24 +29,44 @@
 <div class="sub" style="margin-bottom:10px">
   {{ rows|length }} entri terbaca. Salin nilainya ke form pelanggan.
 </div>
+{% if kind == 'snmp' %}
+<form method="post" action="{% url 'bulk_register' d.id %}" id="massalForm">
+{% csrf_token %}
+{% endif %}
 <div class="panel">
   <table class="grid">
     {% if kind == 'snmp' %}
-    <thead><tr><th style="width:80px">ifIndex</th><th>Nama</th>
-      <th>Deskripsi</th><th style="width:80px">Link</th>
-      <th style="width:150px"></th></tr></thead>
+    <thead><tr>
+      <th style="width:34px"><input type="checkbox" id="pilihSemua"
+          title="Pilih semua yang belum dipakai"></th>
+      <th style="width:80px">ifIndex</th><th>Nama</th>
+      <th>Deskripsi</th><th style="width:70px">Link</th>
+      <th style="width:190px">Nama pelanggan</th>
+      <th style="width:130px">ID layanan</th>
+      <th style="width:100px"></th></tr></thead>
     <tbody>
     {% for r in rows %}
     <tr>
+      <td>{% if not r.used %}
+        <input type="checkbox" name="pilih" class="pilihBaris"
+               value="{{ r.if_index }}|{{ r.if_name }}">{% endif %}</td>
       <td class="mono" style="font-weight:600;color:var(--blue)">{{ r.if_index }}</td>
       <td class="mono">{{ r.if_name }}</td>
       <td style="color:var(--muted)">{{ r.alias|default:"—" }}</td>
       <td>{% if r.oper_up %}<span class="tag green">up</span>
           {% else %}<span class="tag">down</span>{% endif %}</td>
+      <td>{% if not r.used %}
+        <input type="text" name="nama_{{ r.if_index }}" class="inp-kecil"
+               value="{{ r.alias|default:'' }}"
+               placeholder="{{ r.if_name }}"
+               title="Kosong = pakai nama interface">{% endif %}</td>
+      <td>{% if not r.used %}
+        <input type="text" name="sid_{{ r.if_index }}" class="inp-kecil"
+               placeholder="opsional">{% endif %}</td>
       <td>{% if r.used %}<span class="tag">sudah dipakai</span>
           {% else %}
           <a class="btn" style="padding:3px 9px;font-size:12px"
-             href="/admin/monitor/customer/add/?device={{ d.id }}&monitor_type=snmp_if&if_index={{ r.if_index }}&if_name={{ r.if_name|urlencode }}">Daftarkan</a>
+             href="/admin/monitor/customer/add/?device={{ d.id }}&monitor_type=snmp_if&if_index={{ r.if_index }}&if_name={{ r.if_name|urlencode }}">Satuan</a>
           {% endif %}</td>
     </tr>
     {% endfor %}
@@ -73,6 +93,80 @@
     {% endif %}
   </table>
 </div>
+
+{% if kind == 'snmp' %}
+<div class="panel" style="padding:14px;margin-top:12px" id="massalPanel" hidden>
+  <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap">
+    <div>
+      <label class="lbl">ODP</label>
+      <select name="odp" class="inp">
+        <option value="">— tanpa ODP —</option>
+        {% for o in odps %}
+        <option value="{{ o.id }}">{{ o.name }}{% if o.lokasi %}
+          — {{ o.lokasi|truncatechars:30 }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="lbl">Arah port</label>
+      <select name="arah" class="inp">
+        <option value="ke_pelanggan">Menghadap pelanggan</option>
+        <option value="ke_upstream">Menghadap upstream</option>
+      </select>
+    </div>
+    <div>
+      <label class="lbl">Ambang bps</label>
+      <input type="number" name="ambang" class="inp" style="width:120px"
+             placeholder="default">
+    </div>
+    <label class="alarm-chk" style="padding-bottom:7px">
+      <input type="checkbox" name="degradasi" value="1"> deteksi degradasi
+    </label>
+    <button class="btn primary" type="submit" style="margin-left:auto">
+      Daftarkan <span id="jml">0</span> terpilih</button>
+  </div>
+  <p class="sub" style="font-size:11px;margin:10px 0 0">
+    Semua yang dicentang dibuat sekaligus dengan setelan di atas. Kalau ada
+    satu saja yang bermasalah, tidak ada yang didaftarkan — supaya kamu tidak
+    perlu menebak mana yang sudah masuk.
+  </p>
+</div>
+</form>
+<style>
+.lbl{display:block;font-size:10px;color:var(--dim);letter-spacing:.06em;
+  margin-bottom:4px;text-transform:uppercase}
+.inp{background:var(--surface-2);color:var(--text);border:1px solid var(--hairline);
+  border-radius:4px;padding:6px 8px;font-family:var(--sans);font-size:12px}
+.inp-kecil{background:var(--surface-2);color:var(--text);width:100%;
+  border:1px solid var(--hairline);border-radius:3px;padding:3px 6px;
+  font-family:var(--sans);font-size:11px}
+.inp-kecil:focus,.inp:focus{outline:none;border-color:var(--blue)}
+</style>
+<script>
+(function(){
+  var semua = document.getElementById("pilihSemua");
+  var panel = document.getElementById("massalPanel");
+  var jml   = document.getElementById("jml");
+  if (!panel) return;
+  function baris(){ return [].slice.call(document.querySelectorAll(".pilihBaris")); }
+  function sync(){
+    var n = baris().filter(function(x){ return x.checked; }).length;
+    jml.textContent = n;
+    panel.hidden = n === 0;
+    if (semua) {
+      semua.checked = n > 0 && n === baris().length;
+      semua.indeterminate = n > 0 && n < baris().length;
+    }
+  }
+  if (semua) semua.addEventListener("change", function(){
+    baris().forEach(function(x){ x.checked = semua.checked; }); sync();
+  });
+  baris().forEach(function(x){ x.addEventListener("change", sync); });
+  sync();
+})();
+</script>
+{% endif %}
+
 <div class="sub" style="padding:12px 0">
   <a href="?scan=1">Ambil ulang</a>
   {% if kind != 'snmp' %} · Hanya sesi yang sedang aktif yang terlihat di sini.{% endif %}

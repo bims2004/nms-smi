@@ -140,7 +140,8 @@ def set_device_status(conn, device_id: int, status: str):
 
 
 # ---------------------------------------------------------------- buka/tutup
-def open_alert(conn, *, customer=None, device, a_type, severity, suppressed):
+def open_alert(conn, *, customer=None, device, a_type, severity, suppressed,
+               parent_alert_id=None):
     started = datetime.now(timezone.utc)
     cust_id = customer["id"] if customer else None
     dev_id = None if customer else device["id"]
@@ -148,12 +149,13 @@ def open_alert(conn, *, customer=None, device, a_type, severity, suppressed):
         cur.execute(
             """
             INSERT INTO alerts (customer_id, device_id, alert_type, severity,
-                                started_at, suppressed)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                                started_at, suppressed, parent_alert_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT DO NOTHING
             RETURNING id
             """,
-            (cust_id, dev_id, a_type, severity, started, suppressed),
+            (cust_id, dev_id, a_type, severity, started, suppressed,
+             parent_alert_id),
         )
         row = cur.fetchone()
     if row is None:
@@ -163,6 +165,15 @@ def open_alert(conn, *, customer=None, device, a_type, severity, suppressed):
     if suppressed:
         log.info("Alert %s dicatat tapi ditahan (pemeliharaan): %s", a_type,
                  customer["name"] if customer else device["name"])
+        return
+
+    if parent_alert_id is not None:
+        # Imbas ODP yang sudah dilaporkan sendiri. Alertnya TETAP dicatat dan
+        # TETAP dihitung melawan SLA — pelanggannya memang mati. Yang ditekan
+        # hanya notifikasinya, supaya Telegram tidak dibanjiri delapan pesan
+        # untuk satu feeder putus.
+        log.info("Alert %s dicatat, notifikasi ditekan (imbas ODP): %s",
+                 a_type, customer["name"] if customer else device["name"])
         return
 
     if customer:
@@ -246,6 +257,146 @@ def run_escalation(conn):
 
 
 # ---------------------------------------------------------------- siklus utama
+def get_open_odp_alert(conn, odp_id):
+    with db.dict_cursor(conn) as cur:
+        cur.execute(
+            "SELECT * FROM alerts WHERE odp_id = %s AND resolved_at IS NULL",
+            (odp_id,),
+        )
+        return cur.fetchone()
+
+
+def set_odp_status(conn, odp_id, status):
+    with conn.cursor() as cur:
+        cur.execute(
+            """UPDATE odps SET status = %s,
+                   status_changed_at = CASE WHEN status <> %s
+                                            THEN now() ELSE status_changed_at END
+               WHERE id = %s""",
+            (status, status, odp_id),
+        )
+
+
+def open_odp_alert(conn, odp, jumlah_down, total, suppressed):
+    with db.dict_cursor(conn) as cur:
+        cur.execute(
+            """INSERT INTO alerts (odp_id, alert_type, severity, started_at,
+                                   suppressed, notified)
+               VALUES (%s, 'odp_down', 'major', now(), %s, FALSE)
+               RETURNING *""",
+            (odp["id"], suppressed),
+        )
+        a = cur.fetchone()
+
+    if not suppressed:
+        pesan = (
+            f"🔴 ODP DOWN — {odp['name']}\n"
+            f"{jumlah_down} dari {total} pelanggan mati bersamaan.\n"
+        )
+        if odp.get("lokasi"):
+            pesan += f"Lokasi: {odp['lokasi']}\n"
+        pesan += (
+            "Kemungkinan feeder putus atau splitter rusak — "
+            "bukan gangguan per pelanggan."
+        )
+        if notifier.send_telegram(pesan):
+            with conn.cursor() as cur:
+                cur.execute("UPDATE alerts SET notified = TRUE WHERE id = %s",
+                            (a["id"],))
+    return a
+
+
+def resolve_odp_alert(conn, alert, odp):
+    with conn.cursor() as cur:
+        cur.execute("UPDATE alerts SET resolved_at = now() WHERE id = %s",
+                    (alert["id"],))
+        # Lepaskan anak-anaknya. Alert pelanggan yang masih terbuka setelah
+        # ODP pulih berarti gangguan sendiri, bukan lagi imbas ODP.
+        cur.execute(
+            "UPDATE alerts SET parent_alert_id = NULL WHERE parent_alert_id = %s",
+            (alert["id"],),
+        )
+    durasi = datetime.now(timezone.utc) - alert["started_at"]
+    if alert["notified"]:
+        notifier.send_telegram(
+            f"🟢 ODP PULIH — {odp['name']}\nDurasi: {fmt_durasi(durasi)}"
+        )
+
+
+def fmt_durasi(d):
+    total = int(d.total_seconds())
+    j, sisa = divmod(total, 3600)
+    m = sisa // 60
+    if j:
+        return f"{j} jam {m} menit"
+    return f"{m} menit"
+
+
+def korelasi_odp(conn, customers, penilaian, dead_devices, mw):
+    """Tentukan ODP mana yang dianggap mati. Return {odp_id: alert_row}.
+
+    Tidak ada perangkat aktif di dalam box ODP — cuma splitter pasif, tidak
+    bisa ditanyai apa pun. Satu-satunya bukti bahwa ODP bermasalah adalah
+    pelanggan di bawahnya mati BERSAMAAN.
+
+    Satu pelanggan mati  = drop cable-nya sendiri.
+    Semua mati bersamaan = feeder putus atau splitter rusak.
+    """
+    with db.dict_cursor(conn) as cur:
+        cur.execute("SELECT * FROM odps WHERE enabled")
+        odps = {o["id"]: o for o in cur.fetchall()}
+    if not odps:
+        return {}
+
+    # Kelompokkan pelanggan per ODP
+    anggota = {}
+    for c in customers:
+        if c.get("odp_id") in odps:
+            anggota.setdefault(c["odp_id"], []).append(c)
+
+    hasil = {}
+    for odp_id, odp in odps.items():
+        custs = anggota.get(odp_id, [])
+        open_a = get_open_odp_alert(conn, odp_id)
+
+        # Pelanggan yang perangkatnya mati tidak bisa dipakai sebagai bukti —
+        # matinya karena switch/OLT, bukan karena ODP. Kalau semua bukti
+        # berasal dari perangkat mati, ODP tidak bisa dinilai sama sekali.
+        terpakai = [c for c in custs if c["device_id"] not in dead_devices]
+
+        # Pelanggan yang belum cukup sampel juga bukan bukti apa-apa.
+        dinilai = [c for c in terpakai
+                   if penilaian.get(c["id"], {}).get("state") in ("up", "down")]
+
+        total = len(dinilai)
+        turun = [c for c in dinilai if penilaian[c["id"]]["state"] == "down"]
+
+        cukup = (
+            total >= config.ODP_MIN_DOWN
+            and len(turun) >= config.ODP_MIN_DOWN
+            and len(turun) / total >= config.ODP_DOWN_RATIO
+        )
+
+        if cukup:
+            set_odp_status(conn, odp_id, "down")
+            if open_a is None:
+                suppressed = any(
+                    in_maintenance(mw, c["device_id"], c["id"]) for c in turun
+                )
+                open_a = open_odp_alert(conn, odp, len(turun), total, suppressed)
+                log.warning("ODP %s down: %d dari %d pelanggan mati",
+                            odp["name"], len(turun), total)
+            hasil[odp_id] = open_a
+        else:
+            if total:
+                set_odp_status(conn, odp_id, "up" if not turun else "up")
+            if open_a is not None:
+                resolve_odp_alert(conn, open_a, odp)
+                log.info("ODP %s pulih", odp["name"])
+
+    return hasil
+
+
 def run_check(conn):
     n = config.CONSECUTIVE_DOWN_SAMPLES
     mw = load_maintenance(conn)
@@ -277,7 +428,13 @@ def run_check(conn):
             if open_a is not None:
                 resolve_alert(conn, open_a, device=dev)
 
-    # ---- lapis 2: pelanggan ----
+    # ---- lapis 2a: NILAI pelanggan, belum menulis alert ----
+    #
+    # Penilaian dipisah dari penulisan supaya ODP bisa diputuskan lebih dulu.
+    # Kalau alert pelanggan langsung dikirim, delapan notifikasi sudah
+    # terlanjur membanjiri Telegram sebelum kita sempat sadar bahwa
+    # penyebabnya cuma satu ODP.
+    penilaian = {}
     for c in customers:
         dev = devices.get(c["device_id"])
         if dev is None:
@@ -293,37 +450,69 @@ def run_check(conn):
             continue  # data belum cukup atau sudah basi
 
         states = [classify(s, c["threshold_bps"]) for s in samples]
-        latest = samples[0]
-        suppressed = in_maintenance(mw, c["device_id"], c["id"])
-        open_a = get_open_alert(conn, customer_id=c["id"])
-
         if all(s == "down" for s in states):
-            set_customer_status(conn, c["id"], "down")
-            if open_a is None:
-                open_alert(conn, customer=c, device=dev,
-                           a_type=alert_type_for(latest, c["monitor_type"]),
-                           severity="major", suppressed=suppressed)
-            else:
-                retry_notification(conn, open_a, customer=c, device=dev)
-            continue
+            penilaian[c["id"]] = {
+                "state": "down", "sample": samples[0],
+                "samples": samples, "dev": dev,
+            }
+        elif states[0] == "up":
+            penilaian[c["id"]] = {
+                "state": "up", "sample": samples[0],
+                "samples": samples, "dev": dev,
+            }
+        # campuran / unknown: tidak dinilai sama sekali
 
-        if states[0] != "up":
-            continue  # campuran / unknown: biarkan status apa adanya
+    # ---- lapis 2b: korelasi ODP, sebelum notifikasi pelanggan ----
+    odp_alerts = korelasi_odp(conn, customers, penilaian, dead_devices, mw)
+
+    cust_by_id = {c["id"]: c for c in customers}
+
+    # ---- lapis 2c: tulis alert pelanggan ----
+    for cid, p in penilaian.items():
+        c = cust_by_id[cid]
+        dev = p["dev"]
+        suppressed = in_maintenance(mw, c["device_id"], c["id"])
+        open_a = get_open_alert(conn, customer_id=cid)
+        induk = odp_alerts.get(c.get("odp_id"))
+
+        if p["state"] == "down":
+            set_customer_status(conn, cid, "down")
+            if open_a is None:
+                # Kalau ODP-nya yang mati, notifikasi pelanggan ditekan —
+                # satu pesan "ODP-X down (8 pelanggan)" jauh lebih berguna
+                # daripada delapan pesan terpisah pada saat bersamaan.
+                # Alertnya TETAP dicatat dan TETAP dihitung melawan SLA:
+                # pelanggannya memang benar-benar mati.
+                open_alert(conn, customer=c, device=dev,
+                           a_type=alert_type_for(p["sample"], c["monitor_type"]),
+                           severity="major", suppressed=suppressed,
+                           parent_alert_id=induk["id"] if induk else None)
+            else:
+                if induk and open_a["parent_alert_id"] is None:
+                    # Gangguan yang tadinya sendirian ternyata bagian dari ODP
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE alerts SET parent_alert_id = %s WHERE id = %s",
+                            (induk["id"], open_a["id"]),
+                        )
+                elif not induk:
+                    retry_notification(conn, open_a, customer=c, device=dev)
+            continue
 
         # Sampel terakhir normal -> tutup gangguan yang masih terbuka
         if open_a is not None:
             resolve_alert(conn, open_a, customer=c, device=dev)
             open_a = None
-        set_customer_status(conn, c["id"], "up")
+        set_customer_status(conn, cid, "up")
 
         # ---- lapis 3: degradasi terhadap baseline ----
         if not c["baseline_enabled"]:
             continue
-        base = baselines.get(c["id"])
+        base = baselines.get(cid)
         if base is None:
             continue
         totals = [
-            s["in_bps"] + s["out_bps"] for s in samples
+            s["in_bps"] + s["out_bps"] for s in p["samples"]
             if s["in_bps"] is not None and s["out_bps"] is not None
         ]
         if len(totals) < n:

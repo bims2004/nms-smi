@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.urls import reverse
 from django.utils.html import format_html
 
-from .models import Alert, Customer, Device, MaintenanceWindow
+from .models import Alert, Customer, Device, MaintenanceWindow, Odp
 
 admin.site.site_header = "NMS — Kelola inventory"
 admin.site.site_title = "NMS"
@@ -47,9 +47,10 @@ class DeviceAdmin(admin.ModelAdmin):
 
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
-    list_display = ("name", "service_id", "device", "monitor_type",
+    list_display = ("name", "service_id", "device", "odp", "monitor_type",
                     "titik_monitor", "arah", "threshold_bps",
                     "baseline_enabled", "enabled", "status")
+    list_filter = ("enabled", "status", "device", "odp", "monitor_type")
     list_filter = ("status", "monitor_type", "enabled", "baseline_enabled",
                    "device")
     search_fields = ("name", "service_id", "pppoe_username", "if_name")
@@ -63,6 +64,14 @@ class CustomerAdmin(admin.ModelAdmin):
             "description": "Interface fisik → isi ifIndex. "
                            "PPPoE → isi username. "
                            "Belum tahu ifIndex? Buka Perangkat → Lihat interface.",
+        }),
+        ("ODP", {
+            "fields": ("odp",),
+            "description": "Diisi supaya NMS bisa mengenali gangguan ODP. "
+                           "Kalau banyak pelanggan di ODP yang sama mati "
+                           "bersamaan, yang dilaporkan satu gangguan ODP — "
+                           "bukan sekian gangguan terpisah yang membanjiri "
+                           "Telegram.",
         }),
         ("Arah port", {
             "fields": ("if_direction",),
@@ -93,6 +102,30 @@ class CustomerAdmin(admin.ModelAdmin):
         if obj.monitor_type != "snmp_if":
             return "—"
         return "ke pelanggan" if obj.if_direction == "ke_pelanggan" else "ke upstream"
+
+
+@admin.register(Odp)
+class OdpAdmin(admin.ModelAdmin):
+    list_display = ("name", "device", "lokasi", "jumlah_pelanggan",
+                    "kapasitas", "status", "enabled")
+    list_filter = ("enabled", "status", "device")
+    search_fields = ("name", "lokasi", "catatan")
+    fieldsets = (
+        (None, {"fields": ("name", "device", "enabled")}),
+        ("Lokasi", {
+            "fields": ("lokasi", "latitude", "longitude"),
+            "description": "Ini yang dibaca teknisi saat berangkat. Tulis "
+                           "patokan yang benar-benar menolong di lapangan, "
+                           "bukan sekadar nama jalan.",
+        }),
+        ("Lain-lain", {"fields": ("kapasitas", "catatan")}),
+    )
+
+    @admin.display(description="Pelanggan")
+    def jumlah_pelanggan(self, obj):
+        n = obj.customer_set.filter(enabled=True).count()
+        from . import config_hint
+        return f"{n}" if n >= config_hint.ODP_MIN_DOWN else f"{n} (terlalu sedikit)"
 
 
 @admin.register(Alert)

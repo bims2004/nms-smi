@@ -19,14 +19,15 @@ import io
 
 from django.core.exceptions import ValidationError
 
-from .models import Customer, Device
+from .models import Customer, Device, Odp
 
 KOLOM = ["nama", "id_layanan", "perangkat", "tipe", "titik", "ambang_bps",
-         "arah", "deteksi_degradasi"]
+         "arah", "deteksi_degradasi", "odp"]
 
-CONTOH = """nama,id_layanan,perangkat,tipe,titik,ambang_bps,arah,deteksi_degradasi
-PT Maju Jaya,CUST-0001,SW CAKRA,snmp_if,6,100000,ke_pelanggan,ya
-Budi Santoso,CUST-0102,RB5009-BRAS,pppoe,budi@home,50000,,tidak
+CONTOH = """nama,id_layanan,perangkat,tipe,titik,ambang_bps,arah,deteksi_degradasi,odp
+PT Maju Jaya,CUST-0001,SW CAKRA,snmp_if,6,100000,ke_pelanggan,ya,ODP-CAKRA-03
+Budi Santoso,CUST-0102,RB5009-BRAS,pppoe,budi@home,50000,,tidak,ODP-CAKRA-03
+Warung Kopi,CUST-0103,SW CAKRA,snmp_if,7,50000,,,
 """
 
 
@@ -54,8 +55,9 @@ def parse_csv(teks):
         return [], [f"Kolom wajib tidak ada: {', '.join(kurang)}. "
                     f"Judul yang diperlukan: {', '.join(KOLOM)}"]
 
-    # Cache perangkat: kalau tidak, 500 baris = 500 query
+    # Cache perangkat & ODP: kalau tidak, 500 baris = 500 query
     devices = {d.name.strip().lower(): d for d in Device.objects.all()}
+    odps = {o.name.strip().lower(): o for o in Odp.objects.all()}
     terdaftar = set(
         Customer.objects.exclude(service_id__isnull=True)
         .exclude(service_id="")
@@ -127,6 +129,18 @@ def parse_csv(teks):
 
         deg = _bersih(row.get("deteksi_degradasi")).lower()
         c.baseline_enabled = deg in ("ya", "yes", "true", "1", "y")
+
+        odp_nama = _bersih(row.get("odp"))
+        if odp_nama:
+            odp = odps.get(odp_nama.lower())
+            if odp is None:
+                errors.append(
+                    f"Baris {i} ({nama}): ODP '{odp_nama}' tidak terdaftar. "
+                    f"Yang ada: "
+                    f"{', '.join(sorted(o.name for o in odps.values())) or '(belum ada)'}"
+                )
+                continue
+            c.odp = odp
 
         # Validasi yang sama persis dengan form biasa — tidak ada jalan pintas
         try:

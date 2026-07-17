@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
+from django.core.exceptions import ValidationError
 from django.db import connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
@@ -15,9 +16,9 @@ from django.utils import timezone
 from django.utils.formats import date_format
 from django.views.decorators.http import require_POST
 
-from . import importer
+from . import config_hint, importer
 from .discovery import discover_pppoe_sessions, discover_snmp_interfaces
-from .models import (ALERT_TYPE_LABEL, Alert, Customer, Device,
+from .models import (ALERT_TYPE_LABEL, Alert, Customer, Device, Odp,
                      MaintenanceWindow)
 
 SPARK_MINUTES = 60
@@ -621,6 +622,7 @@ def device_interfaces(request, pk):
             r["used"] = r["username"] in used_users
 
     return render(request, "monitor/device_interfaces.html", {
+        "odps": Odp.objects.filter(enabled=True),
         "d": d, "rows": rows, "error": error, "kind": kind,
         "scanned": request.GET.get("scan") == "1",
         "nav": "devices",
@@ -958,4 +960,124 @@ def customer_import(request):
         for c in objek:
             c.save()
     messages.success(request, f"{len(objek)} pelanggan berhasil diimpor.")
+    return redirect("dashboard")
+
+
+@login_required
+def odp_list(request):
+    """Papan status ODP. Yang paling berguna di sini: lokasi."""
+    odps = list(Odp.objects.select_related("device").filter(enabled=True))
+    open_alerts = {
+        a.odp_id: a for a in Alert.objects.filter(
+            odp_id__isnull=False, resolved_at__isnull=True)
+    }
+    now = timezone.now()
+
+    counts = Customer.objects.filter(enabled=True, odp__isnull=False).values(
+        "odp_id", "status")
+    per_odp = {}
+    for row in counts:
+        d = per_odp.setdefault(row["odp_id"], {"total": 0, "down": 0})
+        d["total"] += 1
+        if row["status"] == "down":
+            d["down"] += 1
+
+    rows = []
+    for o in odps:
+        c = per_odp.get(o.id, {"total": 0, "down": 0})
+        a = open_alerts.get(o.id)
+        # ODP dengan pelanggan terlalu sedikit tidak akan pernah terdeteksi.
+        # Lebih baik dikatakan terus terang daripada diam-diam tidak dipantau.
+        cukup = c["total"] >= config_hint.ODP_MIN_DOWN
+        rows.append({
+            "obj": o,
+            "total": c["total"],
+            "down": c["down"],
+            "pct": round(100 * c["down"] / c["total"]) if c["total"] else 0,
+            "alert": a,
+            "down_for": fmt_duration(now - a.started_at) if a else None,
+            "cukup": cukup,
+            "state": ("down" if a else
+                      "unknown" if not c["total"] else
+                      "partial" if c["down"] else "up"),
+        })
+    rows.sort(key=lambda r: (r["state"] != "down", -r["pct"], r["obj"].name))
+
+    return render(request, "monitor/odp_list.html", {
+        "rows": rows,
+        "nav": "odp",
+        "min_down": config_hint.ODP_MIN_DOWN,
+        "ratio_pct": int(config_hint.ODP_DOWN_RATIO * 100),
+        "down_count": sum(1 for r in rows if r["state"] == "down"),
+    })
+
+
+@login_required
+@require_POST
+def bulk_register(request, pk):
+    """Daftarkan banyak interface sekaligus dari halaman penemuan.
+
+    Sama seperti impor CSV: semua berhasil atau tidak sama sekali. Separuh
+    jalan meninggalkan keadaan yang susah dirapikan.
+    """
+    if not request.user.has_perm("monitor.add_customer"):
+        return redirect("dashboard")
+
+    dev = get_object_or_404(Device, pk=pk)
+    dipilih = request.POST.getlist("pilih")
+    if not dipilih:
+        messages.error(request, "Belum ada interface yang dicentang.")
+        return redirect("device_interfaces", pk=pk)
+
+    odp_id = request.POST.get("odp") or None
+    arah = request.POST.get("arah") or "ke_pelanggan"
+    try:
+        ambang = int(request.POST.get("ambang") or 0) or None
+    except ValueError:
+        ambang = None
+    degradasi = request.POST.get("degradasi") == "1"
+
+    objek, errors = [], []
+    for token in dipilih:
+        # token: "<ifIndex>|<ifName>"
+        idx, _, nama_if = token.partition("|")
+        try:
+            idx = int(idx)
+        except ValueError:
+            errors.append(f"ifIndex tidak valid: {idx}")
+            continue
+
+        c = Customer(
+            name=request.POST.get(f"nama_{idx}", "").strip() or nama_if,
+            service_id=request.POST.get(f"sid_{idx}", "").strip() or None,
+            device=dev,
+            monitor_type="snmp_if",
+            if_index=idx,
+            if_name=nama_if or None,
+            if_direction=arah,
+            baseline_enabled=degradasi,
+            odp_id=odp_id or None,
+        )
+        if ambang:
+            c.threshold_bps = ambang
+        try:
+            c.full_clean(exclude=["status", "status_changed_at"])
+        except ValidationError as e:
+            for f, pesan in e.message_dict.items():
+                errors.append(f"{c.name} ({nama_if}): {f} — {' '.join(pesan)}")
+            continue
+        objek.append(c)
+
+    if errors:
+        for e in errors[:8]:
+            messages.error(request, e)
+        if len(errors) > 8:
+            messages.error(request, f"...dan {len(errors) - 8} masalah lain.")
+        messages.error(request, "Tidak ada yang didaftarkan — perbaiki dulu.")
+        return redirect("device_interfaces", pk=pk)
+
+    with transaction.atomic():
+        for c in objek:
+            c.save()
+    messages.success(request, f"{len(objek)} pelanggan berhasil didaftarkan.")
     return redirect("dashboard")

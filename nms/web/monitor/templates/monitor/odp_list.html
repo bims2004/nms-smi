@@ -1,0 +1,110 @@
+{% extends "monitor/base.html" %}
+{% block title %}ODP — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Status ODP</h1>
+  <span class="sub" style="margin-left:auto">
+    <a href="/admin/monitor/odp/add/">Tambah ODP</a>
+  </span>
+</div>
+
+{% if down_count %}
+<div class="msg" style="border-color:rgba(216,72,63,.5);
+     background:rgba(216,72,63,.08);margin-bottom:14px">
+  <strong style="color:var(--red)">{{ down_count }} ODP terdeteksi down.</strong>
+  Ini bukan gangguan per pelanggan — kemungkinan feeder putus atau splitter
+  rusak. Lihat kolom lokasi sebelum mengirim teknisi.
+</div>
+{% endif %}
+
+{% if rows %}
+<div class="panel">
+  <table class="grid">
+    <thead><tr>
+      <th style="width:26px"></th>
+      <th>ODP</th>
+      <th style="width:230px">Lokasi</th>
+      <th style="width:130px">Perangkat</th>
+      <th style="width:150px">Pelanggan</th>
+      <th style="width:130px" class="num">Keterangan</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+    <tr {% if r.state == 'down' %}class="is-down"{% endif %}>
+      <td><span class="led {{ r.state }}"></span></td>
+      <td>
+        <div>{{ r.obj.name }}</div>
+        {% if r.obj.kapasitas %}
+        <div class="mono sub" style="font-size:11px">
+          {{ r.total }}/{{ r.obj.kapasitas }} port terpakai</div>
+        {% endif %}
+      </td>
+      <td style="font-size:12px;color:var(--muted)">
+        {{ r.obj.lokasi|default:"—" }}
+        {% if r.obj.maps_url %}
+        <a href="{{ r.obj.maps_url }}" target="_blank" rel="noopener"
+           style="font-size:11px">peta</a>
+        {% endif %}
+      </td>
+      <td class="mono" style="font-size:12px;color:var(--muted)">
+        {{ r.obj.device.name|default:"—" }}</td>
+      <td>
+        <div class="mono" style="font-size:12px">
+          {% if r.down %}<span style="color:var(--red)">{{ r.down }} mati</span>
+          / {{ r.total }}{% else %}{{ r.total }} normal{% endif %}
+        </div>
+        {% if not r.cukup %}
+        <div class="sub" style="font-size:10px;color:var(--orange)"
+             title="Butuh minimal {{ min_down }} pelanggan supaya gangguan ODP bisa dibedakan dari kebetulan">
+          terlalu sedikit untuk dideteksi</div>
+        {% endif %}
+      </td>
+      <td class="num">
+        {% if r.alert %}
+        <span class="note down">down {{ r.down_for }}</span>
+        {% elif r.state == 'partial' %}
+        <span class="note muted">{{ r.pct }}% mati</span>
+        {% elif r.state == 'unknown' %}
+        <span class="note muted">belum ada pelanggan</span>
+        {% else %}
+        <span class="note muted">normal</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="panel" style="padding:14px;margin-top:14px">
+  <h2 style="font-size:13px;margin:0 0 8px">Cara kerjanya</h2>
+  <p class="sub" style="font-size:12px;line-height:1.75;margin:0">
+    Tidak ada perangkat aktif di dalam box ODP — cuma splitter pasif. ODP
+    tidak bisa di-ping, di-SNMP, atau ditanyai apa pun. Yang dipakai NMS
+    sebagai sensor adalah pelanggannya sendiri.
+    <br><br>
+    Satu pelanggan mati = drop cable-nya sendiri.
+    <strong>{{ ratio_pct }}% pelanggan ODP mati bersamaan</strong>
+    (minimal {{ min_down }} pelanggan) = feeder putus atau splitter rusak.
+    <br><br>
+    Saat itu terjadi, Telegram menerima <strong>satu</strong> pesan ODP, bukan
+    sekian pesan per pelanggan. Gangguan tiap pelanggan tetap dicatat dan
+    tetap dihitung melawan SLA — yang ditekan hanya notifikasinya.
+    <br><br>
+    ODP dengan pelanggan kurang dari {{ min_down }} tidak akan pernah
+    terdeteksi: kalau 2 dari 2 pelanggan mati, itu bisa saja kebetulan, dan
+    mengirim teknisi ke lapangan untuk tebakan itu mahal. Ambangnya bisa
+    diubah lewat <span class="mono">ODP_MIN_DOWN</span> dan
+    <span class="mono">ODP_DOWN_RATIO</span> di <span class="mono">.env</span>.
+  </p>
+</div>
+{% else %}
+<div class="panel"><div class="empty">
+  <h2>Belum ada ODP terdaftar</h2>
+  <p>Daftarkan box ODP, lalu hubungkan pelanggan ke ODP-nya lewat
+     Kelola &rarr; Pelanggan, atau lewat impor CSV.</p>
+  <a class="btn primary" href="/admin/monitor/odp/add/">Tambah ODP</a>
+</div></div>
+{% endif %}
+{% endblock %}

@@ -87,6 +87,7 @@ h1{font-size:19px;font-weight:600;letter-spacing:-.02em;margin:0}
 .led.up{background:var(--green);animation:blink 2.4s ease-in-out infinite}
 .led.down{background:var(--red);animation:alarm 1s steps(2,end) infinite}
 .led.stale{background:var(--orange)}
+.led.partial{background:var(--orange)}
 .led.unknown,.led.disabled{background:var(--dim)}
 .led.disabled::after{display:none}
 @keyframes blink{0%,88%,100%{opacity:1}92%{opacity:.45}}
@@ -185,6 +186,7 @@ footer.foot .wrap{display:flex;gap:16px;flex-wrap:wrap}
   <nav class="main">
     <a href="{% url 'dashboard' %}" class="{% if nav == 'dashboard' %}on{% endif %}">Pelanggan</a>
     <a href="{% url 'alert_list' %}" class="{% if nav == 'alerts' %}on{% endif %}">Gangguan</a>
+    <a href="{% url 'odp_list' %}" class="{% if nav == 'odp' %}on{% endif %}">ODP</a>
     <a href="{% url 'device_list' %}" class="{% if nav == 'devices' %}on{% endif %}">Perangkat</a>
     <a href="{% url 'sla_report' %}" class="{% if nav == 'sla' %}on{% endif %}">SLA</a>
     <a href="/admin/">Kelola</a>

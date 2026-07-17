@@ -43,6 +43,7 @@ SEVERITY_CHOICES = [
 ]
 
 ALERT_TYPE_LABEL = {
+    "odp_down": "ODP down",
     "link_down": "Link down",
     "session_down": "Sesi PPPoE putus",
     "traffic_zero": "Traffic nol",
@@ -115,6 +116,52 @@ class Device(models.Model):
             raise ValidationError(errors)
 
 
+class Odp(models.Model):
+    """Box ODP — titik distribusi optik di lapangan.
+
+    Tidak ada perangkat aktif di dalamnya, cuma splitter pasif. Tidak bisa
+    di-ping, di-SNMP, atau ditanyai apa pun. Pelanggan di bawahnya yang jadi
+    sensornya: kalau mereka mati bersamaan, ODP-nya yang bermasalah.
+    """
+    name = models.CharField("Nama ODP", max_length=100, unique=True,
+                            help_text="Contoh: ODP-CAKRA-03")
+    device = models.ForeignKey(
+        "Device", on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="Perangkat induk",
+        help_text="OLT / switch yang menyuplai ODP ini.")
+    lokasi = models.CharField(
+        "Lokasi", max_length=255, blank=True, null=True,
+        help_text="Alamat atau patokan. Ini yang dibaca teknisi saat "
+                  "berangkat — tulis yang benar-benar menolong di lapangan.")
+    latitude = models.DecimalField("Latitude", max_digits=10, decimal_places=7,
+                                   null=True, blank=True)
+    longitude = models.DecimalField("Longitude", max_digits=10, decimal_places=7,
+                                    null=True, blank=True)
+    kapasitas = models.IntegerField("Kapasitas port", null=True, blank=True,
+                                    help_text="Jumlah port splitter, mis. 8 atau 16.")
+    catatan = models.TextField("Catatan", blank=True, null=True)
+    enabled = models.BooleanField("Aktif", default=True)
+    status = models.CharField(max_length=20, default="unknown", editable=False)
+    status_changed_at = models.DateTimeField(null=True, blank=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, editable=False)
+
+    class Meta:
+        managed = False
+        db_table = "odps"
+        verbose_name = "ODP"
+        verbose_name_plural = "ODP"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def maps_url(self):
+        if self.latitude is None or self.longitude is None:
+            return None
+        return f"https://www.google.com/maps?q={self.latitude},{self.longitude}"
+
+
 class Customer(models.Model):
     name = models.CharField("Nama pelanggan", max_length=200)
     service_id = models.CharField(
@@ -142,6 +189,13 @@ class Customer(models.Model):
         "Ambang traffic (bps)", default=1000,
         help_text="Traffic in+out di bawah nilai ini dihitung sebagai down.",
     )
+    odp = models.ForeignKey(
+        Odp, on_delete=models.SET_NULL, null=True, blank=True,
+        verbose_name="ODP",
+        help_text="Diisi supaya NMS bisa mengenali gangguan ODP: kalau "
+                  "banyak pelanggan di ODP yang sama mati bersamaan, yang "
+                  "dilaporkan satu gangguan ODP, bukan sekian gangguan "
+                  "terpisah.")
     if_direction = models.CharField(
         "Arah port", max_length=20, choices=DIRECTION_CHOICES,
         default="ke_pelanggan",
@@ -201,6 +255,30 @@ class Customer(models.Model):
     def clean(self):
         """Cocokkan dengan CHECK constraint chk_monitor di database."""
         errors = {}
+
+        # Dua pelanggan di titik monitor yang sama berarti data yang sama
+        # dihitung dua kali: alert kembar, dan SLA yang menghitung satu
+        # gangguan sebagai dua. Hampir selalu salah ketik, bukan kesengajaan.
+        if self.device_id:
+            kembar = Customer.objects.filter(device_id=self.device_id)
+            if self.pk:
+                kembar = kembar.exclude(pk=self.pk)
+            if self.monitor_type == "snmp_if" and self.if_index is not None:
+                lain = kembar.filter(if_index=self.if_index).first()
+                if lain:
+                    errors["if_index"] = (
+                        f"ifIndex {self.if_index} di perangkat ini sudah "
+                        f"dipantau oleh '{lain.name}'. Dua pelanggan di port "
+                        f"yang sama akan menghasilkan alert kembar dan angka "
+                        f"SLA yang dihitung dua kali."
+                    )
+            elif self.monitor_type == "pppoe" and self.pppoe_username:
+                lain = kembar.filter(pppoe_username=self.pppoe_username).first()
+                if lain:
+                    errors["pppoe_username"] = (
+                        f"Username '{self.pppoe_username}' di perangkat ini "
+                        f"sudah dipantau oleh '{lain.name}'."
+                    )
         if self.monitor_type == "snmp_if":
             if self.if_index is None:
                 errors["if_index"] = "Wajib diisi untuk monitoring interface fisik."
@@ -229,6 +307,18 @@ class Alert(models.Model):
         Device, on_delete=models.CASCADE, db_column="device_id",
         verbose_name="Perangkat", blank=True, null=True,
     )
+    odp = models.ForeignKey(
+        Odp, on_delete=models.CASCADE, db_column="odp_id",
+        verbose_name="ODP", blank=True, null=True,
+    )
+    parent_alert = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, db_column="parent_alert_id",
+        related_name="children", blank=True, null=True,
+        verbose_name="Imbas dari",
+        help_text="Kalau terisi, gangguan ini akibat gangguan induknya "
+                  "(mis. ODP putus). Notifikasinya ditekan supaya Telegram "
+                  "tidak dibanjiri, tapi tetap dihitung melawan SLA.",
+    )
     alert_type = models.CharField("Jenis", max_length=50)
     severity = models.CharField("Tingkat", max_length=20,
                                 choices=SEVERITY_CHOICES, default="major")
@@ -253,9 +343,11 @@ class Alert(models.Model):
 
     @property
     def subject(self):
-        """Nama yang terkena gangguan: pelanggan, atau perangkat."""
+        """Nama yang terkena gangguan: pelanggan, ODP, atau perangkat."""
         if self.customer_id:
             return self.customer.name
+        if self.odp_id:
+            return self.odp.name
         if self.device_id:
             return self.device.name
         return "—"

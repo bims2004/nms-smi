@@ -1091,3 +1091,155 @@ terbaca seperti masalah jaringan.
 Itu persis yang terjadi: enkripsi kredensial ditambahkan ke collector tapi
 `import`-nya tidak ikut, dan `discovery.py` tidak pernah mendekripsi sama
 sekali — jadi yang terkirim ke Mikrotik adalah ciphertext-nya.
+
+---
+
+# Monitoring ODP
+
+Tidak ada perangkat aktif di dalam box ODP — cuma splitter pasif. ODP tidak
+bisa di-ping, di-SNMP, atau ditanyai apa pun. **Pelanggan di bawahnya yang
+jadi sensornya.**
+
+Satu pelanggan mati = drop cable-nya sendiri.
+Pelanggan satu ODP mati bersamaan = feeder putus atau splitter rusak.
+
+## Cara memakainya
+
+1. Kelola → ODP → Tambah ODP. Isi **lokasi** dengan patokan yang benar-benar
+   menolong teknisi di lapangan, bukan sekadar nama jalan. Koordinat opsional
+   tapi memunculkan tautan peta di dashboard.
+2. Hubungkan pelanggan ke ODP-nya — lewat Kelola → Pelanggan, kolom `odp` di
+   impor CSV, atau pendaftaran massal.
+3. Halaman **ODP** menampilkan status semuanya.
+
+## Ambangnya, dan kenapa begitu
+
+| Setelan | Default | Arti |
+|---|---|---|
+| `ODP_MIN_DOWN` | 3 | Pelanggan mati minimal sebelum ODP dituduh |
+| `ODP_DOWN_RATIO` | 0.75 | Bagian pelanggan ODP yang harus mati |
+
+**Kenapa ada minimal 3:** kalau ODP cuma punya 2 pelanggan dan keduanya mati,
+itu bisa saja kebetulan. Mengirim teknisi ke lapangan untuk tebakan itu mahal.
+ODP dengan pelanggan kurang dari `ODP_MIN_DOWN` tidak akan pernah terdeteksi —
+dashboard mengatakannya terus terang ("terlalu sedikit untuk dideteksi")
+daripada diam-diam tidak memantau.
+
+**Kenapa 75% dan bukan 100%:** splitter bisa rusak sebagian. Menunggu 8 dari 8
+berarti melewatkan kerusakan yang sudah nyata di 6 dari 8.
+
+Naikkan rasionya kalau sering salah tuduh; turunkan kalau ODP setengah mati
+sering terlewat.
+
+## Yang terjadi saat ODP down
+
+Telegram menerima **satu** pesan:
+
+```
+🔴 ODP DOWN — ODP-CAKRA-03
+8 dari 8 pelanggan mati bersamaan.
+Lokasi: Jl. Cakra No.12, depan warung Bu Sri
+Kemungkinan feeder putus atau splitter rusak — bukan gangguan per pelanggan.
+```
+
+Bukan delapan pesan. Delapan pesan untuk satu feeder putus itu banjir, bukan
+informasi — dan orang yang kebanjiran akan berhenti membaca.
+
+**Gangguan tiap pelanggan tetap dicatat.** Yang ditekan hanya notifikasinya.
+Ini penting: ODP putus **tetap dihitung melawan SLA** pelanggan, karena
+pelanggannya memang benar-benar mati.
+
+Secara teknis, alert pelanggan menunjuk ke alert ODP lewat `parent_alert_id`.
+Sengaja **tidak** memakai kolom `suppressed` — itu dipakai jendela
+pemeliharaan, dan laporan SLA punya tombol untuk mengecualikannya. ODP putus
+bukan pemeliharaan.
+
+## Yang sengaja tidak dituduhkan ke ODP
+
+**Perangkat mati.** Kalau switch/OLT-nya yang mati, semua pelanggan di
+bawahnya ikut mati — termasuk yang satu ODP. Itu bukan ODP putus, dan sudah
+punya alertnya sendiri. Pelanggan yang perangkatnya mati tidak dipakai sebagai
+bukti sama sekali; kalau tidak, setiap switch reboot akan mengirim teknisi ke
+lapangan memeriksa ODP yang sebenarnya baik-baik saja.
+
+**Pelanggan yang belum cukup sampel.** Belum tahu bukan berarti mati.
+
+## Kelemahan yang perlu diketahui
+
+Pelanggan yang sudah lama mati (belum bayar, CPE dicabut) tetap dihitung
+sebagai "mati" dan ikut mendorong rasio. Di ODP kecil ini bisa memicu tuduhan
+palsu. **Nonaktifkan pelanggan yang memang sudah tidak berlangganan** —
+centang `enabled` dilepas — supaya tidak mengotori deteksi.
+
+---
+
+# Pendaftaran massal
+
+Dua jalan, untuk keperluan berbeda.
+
+## Dari halaman penemuan interface
+
+Perangkat → Lihat interface → centang beberapa → panel muncul di bawah.
+
+Isi ODP, arah port, ambang, dan deteksi degradasi **sekali** untuk semua yang
+dicentang. Nama pelanggan diisi otomatis dari `ifAlias` perangkat — kalau NOC
+sudah rajin mengisi deskripsi port di switch, pendaftarannya nyaris tinggal
+centang.
+
+Ini yang paling cocok untuk switch baru: semua ifIndex-nya sudah pasti benar
+karena dibaca langsung dari perangkat, bukan diketik ulang.
+
+## Impor CSV
+
+Dashboard → Impor CSV. Cocok kalau datanya sudah ada di spreadsheet.
+
+Kolom `odp` sudah ditambahkan. CSV lama tanpa kolom itu tetap jalan.
+
+## Keduanya: semua berhasil atau tidak sama sekali
+
+Satu baris rusak = nol yang masuk. Impor setengah jalan meninggalkan keadaan
+yang susah dirapikan — orang tidak tahu mana yang sudah masuk dan mana yang
+belum.
+
+---
+
+# Titik monitor tidak boleh kembar
+
+Sejak Fase 1 tidak ada yang melarang dua pelanggan menempel di ifIndex yang
+sama pada perangkat yang sama. Akibatnya: keduanya membaca counter yang sama,
+keduanya beralarm saat port itu mati, dan laporan SLA menghitung satu gangguan
+sebagai dua. Hampir selalu salah ketik.
+
+`07_titik_unik.sql` memasang constraint untuk itu, dan validasinya juga ada di
+lapisan form — jadi berlaku untuk admin, impor CSV, maupun pendaftaran massal.
+
+Migrasinya **hanya memasang constraint kalau datanya bersih.** Kalau sudah
+terlanjur ada kembar, dia menolak memasang dan menyebutkan yang mana:
+
+```
+WARNING: Constraint ifIndex unik TIDAK dipasang: ada 1 titik yang dipantau
+         lebih dari satu pelanggan. device 12 ifIndex 6 dipakai 2x
+WARNING: Rapikan lewat Kelola -> Pelanggan, lalu jalankan upgrade-db.sh lagi.
+```
+
+Memaksanya masuk akan menggagalkan seluruh upgrade, dan itu lebih buruk
+daripada satu constraint yang tertunda.
+
+---
+
+# Menjalankan tes
+
+```bash
+docker compose exec collector python tests/test_alerter.py   # 27 tes
+docker compose exec collector python tests/test_pollers.py   #  5 tes
+docker compose exec web python manage.py test monitor        #  3 tes
+```
+
+`test_alerter.py` ditulis **sebelum** korelasi ODP ditambahkan, sebagai
+rekaman perilaku yang sudah ada. Alerter adalah jantung sistem ini; menulis
+ulang intinya tanpa jaring pengaman adalah cara paling pasti untuk merusaknya
+diam-diam.
+
+Tes itu juga yang menangkap bahwa constraint titik-unik yang baru ternyata
+melanggar tes ODP saya sendiri — dua ODP memakai ifIndex yang sama di
+perangkat yang sama. Constraint-nya benar, tesnya yang salah.
