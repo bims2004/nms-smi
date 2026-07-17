@@ -1,7 +1,7 @@
 {% load l10n %}
-{# Dipakai dua tempat: render awal halaman, dan endpoint live.
+{% comment %} Dipakai dua tempat: render awal halaman, dan endpoint live.
    Grafik tetap dirender di server — tidak ada logika penggambaran yang
-   diduplikasi di JavaScript, jadi tidak bisa berbeda antara keduanya. #}
+   diduplikasi di JavaScript, jadi tidak bisa berbeda antara keduanya. {% endcomment %}
 {% if chart %}
 {% localize off %}
 <svg class="chart" viewBox="0 0 {{ chart.width }} {{ chart.height }}"

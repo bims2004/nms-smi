@@ -40,3 +40,14 @@ DEVICE_FAIL_THRESHOLD = _int("DEVICE_FAIL_THRESHOLD", 3)
 ESCALATION_MINUTES = _int("ESCALATION_MINUTES", 30)
 # Seberapa sering baseline dihitung ulang (jam)
 BASELINE_REFRESH_HOURS = _int("BASELINE_REFRESH_HOURS", 6)
+
+# Berapa perangkat di-poll bersamaan. Perangkat mati memblokir selama
+# SNMP_TIMEOUT x (retries+1); tanpa paralel, beberapa perangkat mati sekaligus
+# membuat siklus meleset dari POLL_INTERVAL. Naikkan kalau perangkatnya banyak.
+POLL_WORKERS = _int("POLL_WORKERS", 8)
+
+# URL yang di-ping tiap siklus sebagai bukti NMS masih hidup (dead man's
+# switch). Kalau ping berhenti, layanan di seberang yang memberi tahu — karena
+# NMS yang mati tidak bisa memberi tahu tentang dirinya sendiri.
+# Kosongkan untuk mematikan. Cocok dengan healthchecks.io, Uptime Kuma, dsb.
+HEARTBEAT_URL = os.environ.get("HEARTBEAT_URL", "").strip()

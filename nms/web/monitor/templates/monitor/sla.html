@@ -35,6 +35,24 @@
   <button class="btn primary" type="submit">Tampilkan</button>
 </form>
 
+{% if blind_fmt %}
+<div class="msg" style="border-color:rgba(216,72,63,.5);
+     background:rgba(216,72,63,.08);margin-bottom:14px">
+  <strong style="color:var(--red)">NMS sendiri tidak mencatat selama
+  {{ blind_fmt }} ({{ blind_pct }}% dari periode), dalam {{ blind_gaps }}
+  jeda.</strong>
+  Selama itu gangguan pelanggan tidak terdeteksi dan tidak tercatat, jadi
+  <strong>angka uptime di bawah lebih tinggi dari kenyataan</strong>.
+  Cocokkan dengan catatan tiket sebelum dipakai ke pelanggan.
+</div>
+{% elif blind_unknown %}
+<div class="msg" style="margin-bottom:14px">
+  Belum ada catatan denyut NMS untuk periode ini, jadi tidak diketahui apakah
+  NMS sempat mati. Pencatatan denyut baru dimulai setelah pembaruan terakhir —
+  periode sebelumnya tidak bisa diperiksa.
+</div>
+{% endif %}
+
 <div class="tally">
   <div><div class="n" style="font-size:17px">{{ rows|length }}</div>
        <div class="l">Pelanggan</div></div>

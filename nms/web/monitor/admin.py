@@ -48,8 +48,8 @@ class DeviceAdmin(admin.ModelAdmin):
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
     list_display = ("name", "service_id", "device", "monitor_type",
-                    "titik_monitor", "threshold_bps", "baseline_enabled",
-                    "enabled", "status")
+                    "titik_monitor", "arah", "threshold_bps",
+                    "baseline_enabled", "enabled", "status")
     list_filter = ("status", "monitor_type", "enabled", "baseline_enabled",
                    "device")
     search_fields = ("name", "service_id", "pppoe_username", "if_name")
@@ -63,6 +63,13 @@ class CustomerAdmin(admin.ModelAdmin):
             "description": "Interface fisik → isi ifIndex. "
                            "PPPoE → isi username. "
                            "Belum tahu ifIndex? Buka Perangkat → Lihat interface.",
+        }),
+        ("Arah port", {
+            "fields": ("if_direction",),
+            "description": "Hanya untuk SNMP interface. Salah setel membuat "
+                           "download dan upload tertukar di semua grafik dan "
+                           "laporan — angkanya tetap terlihat masuk akal, "
+                           "cuma terbalik.",
         }),
         ("Ambang alert", {"fields": ("threshold_bps",)}),
         ("Deteksi degradasi", {
@@ -79,6 +86,13 @@ class CustomerAdmin(admin.ModelAdmin):
         if obj.monitor_type == "snmp_if":
             return obj.if_name or f"ifIndex {obj.if_index}"
         return obj.pppoe_username or "—"
+
+
+    @admin.display(description="Arah")
+    def arah(self, obj):
+        if obj.monitor_type != "snmp_if":
+            return "—"
+        return "ke pelanggan" if obj.if_direction == "ke_pelanggan" else "ke upstream"
 
 
 @admin.register(Alert)

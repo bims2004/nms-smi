@@ -478,6 +478,80 @@ def check_storage(conn):
             conn.rollback()
 
 
+def check_ketahanan(conn):
+    head("Ketahanan")
+    # Dead man's switch
+    if config.HEARTBEAT_URL:
+        ok("Dead man's switch aktif — collector berdetak ke layanan luar")
+    else:
+        warn("HEARTBEAT_URL kosong. Kalau NMS mati semalam, tidak ada yang "
+             "tahu — dan laporan SLA akan menghitung periode itu sebagai "
+             "uptime 100%.")
+        info("Isi dengan URL ping dari healthchecks.io / Uptime Kuma di .env")
+
+    # Detak internal
+    with db.dict_cursor(conn) as cur:
+        try:
+            cur.execute("""
+                SELECT max(time) AS terakhir,
+                       count(*) FILTER (WHERE time > now() - interval '24 hours') AS sehari
+                FROM nms_heartbeat WHERE component = 'collector'
+            """)
+            h = cur.fetchone()
+            if h["terakhir"] is None:
+                warn("Belum ada catatan detak collector")
+            else:
+                info(f"detak terakhir  : {age_str(h['terakhir'])}")
+                harap = 86400 // max(1, config.POLL_INTERVAL)
+                if h["sehari"] < harap * 0.9:
+                    hilang = 100 * (1 - h["sehari"] / harap)
+                    bad(f"Collector tidak mencatat {hilang:.0f}% dari 24 jam "
+                        f"terakhir ({h['sehari']} dari ~{harap} detak)",
+                        "Selama itu gangguan tidak terdeteksi, dan laporan "
+                        "SLA membacanya sebagai tidak ada gangguan.")
+                else:
+                    ok(f"Collector berdetak lengkap 24 jam terakhir "
+                       f"({h['sehari']} detak)")
+        except Exception:
+            conn.rollback()
+            warn("Tabel nms_heartbeat belum ada — jalankan ./scripts/upgrade-db.sh")
+
+    # Paralelisme vs jumlah perangkat
+    with db.dict_cursor(conn) as cur:
+        cur.execute("SELECT count(*) AS n FROM devices WHERE enabled")
+        n = cur.fetchone()["n"]
+    blokir = config.SNMP_TIMEOUT * (config.SNMP_RETRIES + 1)
+    terburuk = (n / max(1, config.POLL_WORKERS)) * blokir
+    info(f"paralel         : {config.POLL_WORKERS} pekerja, {n} perangkat")
+    if terburuk > config.POLL_INTERVAL:
+        bad(f"Kalau SEMUA perangkat mati, satu siklus butuh ~{terburuk:.0f} "
+            f"detik — melewati POLL_INTERVAL {config.POLL_INTERVAL} detik",
+            f"Naikkan POLL_WORKERS ke minimal "
+            f"{int(n * blokir / config.POLL_INTERVAL) + 1} di .env")
+    else:
+        ok(f"Skenario terburuk (semua perangkat mati): ~{terburuk:.0f} detik, "
+           f"masih di bawah POLL_INTERVAL {config.POLL_INTERVAL} detik")
+
+    # Enkripsi kredensial
+    from . import crypto
+    with db.dict_cursor(conn) as cur:
+        cur.execute("""
+            SELECT count(*) FILTER (WHERE api_password LIKE 'enc:%%') AS aman,
+                   count(*) FILTER (WHERE api_password IS NOT NULL
+                                    AND api_password <> ''
+                                    AND api_password NOT LIKE 'enc:%%') AS polos
+            FROM devices
+        """)
+        e = cur.fetchone()
+    if e["polos"]:
+        bad(f"{e['polos']} password perangkat masih tersimpan sebagai teks polos",
+            "Isi NMS_SECRET_KEY di .env, lalu buka & simpan ulang perangkatnya "
+            "lewat Kelola -> Perangkat. Yang paling berisiko: backup .sql.gz "
+            "yang disalin keluar server.")
+    elif e["aman"]:
+        ok(f"{e['aman']} password perangkat tersimpan terenkripsi")
+
+
 # ------------------------------------------------------------------- alerts
 def check_alerts(conn):
     head("Alert")
@@ -520,6 +594,7 @@ def main():
         check_samples(conn)
         check_customers(conn)
         check_alerts(conn)
+        check_ketahanan(conn)
     check_storage(conn)
 
     head("Ringkasan")

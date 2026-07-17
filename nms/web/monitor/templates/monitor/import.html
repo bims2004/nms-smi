@@ -1,0 +1,129 @@
+{% extends "monitor/base.html" %}
+{% block title %}Impor pelanggan — NMS{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Impor pelanggan</h1>
+  <span class="sub" style="margin-left:auto">
+    <a href="{% url 'dashboard' %}">Kembali</a>
+  </span>
+</div>
+
+{% if gagal_total %}
+<div class="msg" style="border-color:rgba(216,72,63,.5);background:rgba(216,72,63,.08)">
+  <strong style="color:var(--red)">{{ errors|length }} masalah ditemukan —
+  tidak ada satu pun pelanggan yang diimpor.</strong>
+  Impor hanya jalan kalau seluruh baris bersih. Impor setengah jalan
+  meninggalkan keadaan yang susah dirapikan.
+  <ul style="margin:8px 0 0;padding-left:18px;line-height:1.7">
+    {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if pratinjau %}
+<div class="msg" style="border-color:rgba(79,168,94,.5);background:rgba(79,168,94,.08)">
+  <strong style="color:var(--green)">{{ objek|length }} pelanggan siap diimpor,
+  tidak ada masalah.</strong> Periksa dulu di bawah, belum ada yang disimpan.
+</div>
+
+<div class="panel" style="margin-bottom:14px">
+  <table class="grid">
+    <thead><tr>
+      <th>Pelanggan</th><th style="width:110px">ID layanan</th>
+      <th style="width:140px">Perangkat</th><th style="width:100px">Tipe</th>
+      <th style="width:130px">Titik</th><th style="width:120px">Arah</th>
+      <th style="width:110px">Ambang</th><th style="width:90px">Degradasi</th>
+    </tr></thead>
+    <tbody>
+    {% for c in objek %}
+    <tr>
+      <td>{{ c.name }}</td>
+      <td class="mono" style="font-size:12px">{{ c.service_id|default:"—" }}</td>
+      <td class="mono" style="font-size:12px;color:var(--muted)">{{ c.device.name }}</td>
+      <td style="font-size:12px">{{ c.get_monitor_type_display }}</td>
+      <td class="mono" style="font-size:12px">
+        {% if c.monitor_type == 'snmp_if' %}ifIndex {{ c.if_index }}
+        {% else %}{{ c.pppoe_username }}{% endif %}</td>
+      <td style="font-size:12px;color:var(--muted)">
+        {% if c.monitor_type == 'snmp_if' %}{{ c.get_if_direction_display }}
+        {% else %}—{% endif %}</td>
+      <td class="mono" style="font-size:12px">{{ c.threshold_bps }}</td>
+      <td style="font-size:12px">{% if c.baseline_enabled %}ya{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<form method="post" style="margin-bottom:22px">
+  {% csrf_token %}
+  <input type="hidden" name="teks" value="{{ teks }}">
+  <input type="hidden" name="aksi" value="simpan">
+  <button class="btn primary" type="submit">
+    Simpan {{ objek|length }} pelanggan</button>
+  <a class="btn" href="{% url 'customer_import' %}" style="margin-left:6px">Batal</a>
+</form>
+{% endif %}
+
+{% if not pratinjau %}
+<form method="post" enctype="multipart/form-data" class="panel"
+      style="padding:16px;margin-bottom:16px">
+  {% csrf_token %}
+  <div style="margin-bottom:12px">
+    <label style="font-size:12px;color:var(--muted);display:block;
+           margin-bottom:5px">Unggah berkas CSV</label>
+    <input type="file" name="berkas" accept=".csv,text/csv"
+           style="font-size:12px;color:var(--text)">
+  </div>
+  <div style="margin-bottom:12px">
+    <label style="font-size:12px;color:var(--muted);display:block;
+           margin-bottom:5px">…atau tempel isinya di sini</label>
+    <textarea name="teks" rows="7" spellcheck="false"
+              style="width:100%;background:var(--surface-2);color:var(--text);
+                     border:1px solid var(--hairline);border-radius:4px;
+                     padding:9px;font-family:var(--mono);font-size:12px"
+              placeholder="{{ contoh }}">{{ teks|default:"" }}</textarea>
+  </div>
+  <button class="btn primary" type="submit">Periksa dulu</button>
+  <span class="sub" style="margin-left:8px;font-size:11px">
+    Belum akan disimpan — kamu akan melihat pratinjaunya dulu.</span>
+</form>
+
+<div class="panel" style="padding:16px">
+  <h2 style="font-size:14px;margin:0 0 10px">Format</h2>
+  <pre class="mono" style="background:var(--surface-2);padding:11px;
+       border-radius:4px;font-size:11px;overflow-x:auto;margin:0 0 12px">{{ contoh }}</pre>
+  <table class="grid" style="font-size:12px">
+    <thead><tr><th style="width:150px">Kolom</th><th>Isi</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">nama</td><td>Wajib.</td></tr>
+      <tr><td class="mono">id_layanan</td>
+          <td>Boleh kosong. Kalau diisi harus unik.</td></tr>
+      <tr><td class="mono">perangkat</td>
+          <td>Wajib. Harus <strong>persis</strong> sama dengan nama perangkat
+              yang sudah terdaftar.</td></tr>
+      <tr><td class="mono">tipe</td>
+          <td>Wajib. <code>snmp_if</code> atau <code>pppoe</code>. Harus cocok
+              dengan metode polling perangkatnya.</td></tr>
+      <tr><td class="mono">titik</td>
+          <td>Wajib. ifIndex berupa <strong>angka</strong> untuk snmp_if,
+              username untuk pppoe. Perhatikan: ifIndex, bukan nama interface —
+              keduanya sering berbeda.</td></tr>
+      <tr><td class="mono">ambang_bps</td>
+          <td>Boleh kosong (memakai default).</td></tr>
+      <tr><td class="mono">arah</td>
+          <td>Boleh kosong (default <code>ke_pelanggan</code>). Hanya untuk
+              snmp_if.</td></tr>
+      <tr><td class="mono">deteksi_degradasi</td>
+          <td>Boleh kosong. Isi <code>ya</code> untuk mengaktifkan.</td></tr>
+    </tbody>
+  </table>
+  <p class="sub" style="font-size:12px;margin:12px 0 0;line-height:1.7">
+    Tidak yakin ifIndex-nya berapa? Buka <a href="{% url 'device_list' %}">Perangkat</a>
+    → Lihat interface. Di situ ifIndex asli dari perangkat ditampilkan, dan
+    tombol Daftarkan mengisinya otomatis untuk satuan.
+  </p>
+</div>
+{% endif %}
+{% endblock %}

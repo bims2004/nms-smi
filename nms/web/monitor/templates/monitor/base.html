@@ -143,6 +143,13 @@ table.grid tr:hover td{background:var(--surface-2)}
   border:1px solid var(--hairline);background:var(--surface-2);
   color:var(--text);font-family:var(--sans)}
 .btn-ack:hover{border-color:var(--blue)}
+#liveBtn{padding:4px 10px;font-size:12px;display:flex;align-items:center;gap:5px}
+#liveBtn.on{border-color:var(--green);color:var(--green)}
+#liveBtn #liveBtnDot{color:var(--slate);font-size:9px;transition:color .2s}
+#liveBtn.on #liveBtnDot{color:var(--green);animation:livePulse 2s ease-in-out infinite}
+#liveBtn.err{border-color:var(--red);color:var(--red)}
+#liveBtn.err #liveBtnDot{color:var(--red);animation:none}
+@keyframes livePulse{0%,100%{opacity:1}50%{opacity:.25}}
 /* Teks di dalam SVG ikut terskala viewBox. Di layar sempit skalanya
    mengecil drastis, jadi ukurannya dinaikkan supaya tetap terbaca. */
 .chart text{font-size:9px;font-family:var(--mono);fill:var(--dim);

@@ -36,6 +36,11 @@
 
   <div style="width:1px;height:22px;background:var(--hairline)"></div>
 
+  <button class="btn" id="liveBtn" type="button" hidden
+          title="Segarkan grafik otomatis tanpa reload halaman">
+    <span id="liveBtnDot">&#9679;</span> <span id="liveBtnTxt">Live</span>
+  </button>
+
   <form method="get" style="display:flex;gap:6px;align-items:center">
     <label style="font-size:12px;color:var(--muted)">Tanggal</label>
     <input type="date" name="date" value="{{ date_value }}" max="{{ today }}"
@@ -58,7 +63,6 @@
   {% endif %}
 
   <span class="mono" style="margin-left:auto;font-size:12px;color:var(--dim)">
-    <span id="liveDot" hidden style="color:var(--green)">&#9679;</span>
     <span id="liveTxt">{{ period.label }}</span></span>
 </div>
 
@@ -111,28 +115,51 @@
 <script>
 (function () {
   "use strict";
-  // Realtime hanya untuk rentang pendek. Menyegarkan grafik 90 hari tiap
-  // setengah menit membebani database tanpa ada yang bisa dilihat berubah —
-  // satu titik di grafik 90 hari mewakili 6 jam.
-  var LIVE_RANGES = {"1h": 1, "6h": 1, "24h": 1};
-  var mode = "{{ period.mode }}";
+  // Live hanya masuk akal untuk rentang pendek. Satu titik di grafik 90 hari
+  // mewakili 6 jam — menyegarkannya tiap setengah menit membebani database
+  // tanpa ada yang bisa terlihat berubah. Data masa lalu juga tidak berubah,
+  // jadi mode tanggal tidak ikut.
+  var LIVE_RANGES = {"15m": 1, "1h": 1, "6h": 1, "24h": 1};
+  var mode  = "{{ period.mode }}";
   var range = "{{ period.range|default:'' }}";
-  if (mode !== "range" || !LIVE_RANGES[range]) return;
 
+  var btn   = document.getElementById("liveBtn");
+  var btnTx = document.getElementById("liveBtnTxt");
   var box   = document.getElementById("chartBox");
   var stats = document.getElementById("statsBox");
-  var dot   = document.getElementById("liveDot");
   var txt   = document.getElementById("liveTxt");
-  if (!box || !dot) return;
+  if (!btn || !box) return;
+
+  if (mode !== "range" || !LIVE_RANGES[range]) {
+    // Tombolnya tetap disembunyikan, bukan ditampilkan dalam keadaan mati —
+    // tombol yang tidak bisa diklik cuma bikin bingung.
+    return;
+  }
+  btn.hidden = false;
+
+  var KEY = "nms.live";
+  var on = true;
+  try {
+    var v = localStorage.getItem(KEY);
+    if (v !== null) on = (v === "1");
+  } catch (e) { /* localStorage diblok — pakai default */ }
 
   var url = "{% url 'customer_live' c.id %}?range=" + encodeURIComponent(range);
   var label = txt.textContent.trim();
   var gagal = 0;
   var timer = null;
 
-  dot.hidden = false;
+  function render() {
+    btn.classList.toggle("on", on);
+    btnTx.textContent = on ? "Live" : "Live mati";
+    if (!on) {
+      btn.classList.remove("err");
+      txt.textContent = label;
+    }
+  }
 
   function tick() {
+    if (!on) return;
     fetch(url, {headers: {"X-Requested-With": "fetch"}})
       .then(function (r) {
         if (!r.ok) throw new Error(r.status);
@@ -140,7 +167,7 @@
       })
       .then(function (d) {
         gagal = 0;
-        dot.style.color = "var(--green)";
+        btn.classList.remove("err");
         box.innerHTML = d.chart_html;
         if (stats) {
           if (d.has_stats) {
@@ -150,29 +177,42 @@
             stats.hidden = true;
           }
         }
-        txt.textContent = label + (d.latest ? " · sampel " + d.latest : "");
+        txt.textContent = label + (d.latest ? " \u00b7 sampel " + d.latest : "");
       })
       .catch(function () {
         gagal++;
-        dot.style.color = "var(--red)";
-        txt.textContent = label + " · gagal memuat";
-        // Kalau server bermasalah, jangan terus menghantamnya tiap 30 detik.
-        if (gagal >= 3 && timer) {
-          clearInterval(timer);
-          timer = setInterval(tick, 120000);
-        }
+        btn.classList.add("err");
+        txt.textContent = label + " \u00b7 gagal memuat";
+        // Server yang sedang susah tidak perlu dihantam tiap 30 detik.
+        if (gagal === 3) restart(120000);
       });
   }
 
-  // Collector mengambil sampel tiap POLL_INTERVAL (default 60 detik), jadi
-  // menyegarkan lebih cepat dari itu cuma menampilkan data yang sama.
-  // 30 detik memberi jeda supaya sampel baru cepat terlihat tanpa boros.
-  timer = setInterval(tick, 30000);
+  function restart(ms) {
+    if (timer) clearInterval(timer);
+    timer = on ? setInterval(tick, ms) : null;
+  }
+
+  btn.addEventListener("click", function () {
+    on = !on;
+    try { localStorage.setItem(KEY, on ? "1" : "0"); } catch (e) {}
+    gagal = 0;
+    render();
+    restart(30000);
+    if (on) tick();
+  });
+
+  render();
+  if (on) {
+    // Collector mengambil sampel tiap POLL_INTERVAL (default 60 detik), jadi
+    // menyegarkan lebih cepat dari itu cuma menampilkan data yang sama.
+    restart(30000);
+  }
 
   // Browser memperlambat timer di tab tersembunyi. Saat tab dibuka lagi,
   // segarkan langsung supaya yang terlihat bukan data basi.
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) tick();
+    if (!document.hidden && on) tick();
   });
 })();
 </script>

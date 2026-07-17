@@ -9,7 +9,8 @@
         align-items:center;flex-wrap:wrap">
     {% include "monitor/_alarm.html" %}
     <span>{{ device_count }} perangkat aktif ·
-      <a href="/admin/monitor/customer/add/">Tambah pelanggan</a></span>
+      <a href="/admin/monitor/customer/add/">Tambah pelanggan</a> ·
+      <a href="{% url 'customer_import' %}">Impor CSV</a></span>
   </span>
 </div>
 

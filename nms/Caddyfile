@@ -1,0 +1,43 @@
+# Reverse proxy TLS untuk dashboard NMS.
+#
+# Dipakai lewat: docker compose --profile https up -d
+#
+# Secara default memakai sertifikat yang diterbitkan sendiri (self-signed),
+# karena jaringan management biasanya tidak punya DNS publik — dan tanpa DNS
+# publik, Let's Encrypt tidak bisa memverifikasi apa pun.
+#
+# Akibatnya browser akan memperingatkan "koneksi tidak aman" pada kunjungan
+# pertama. Itu wajar dan jujur: sertifikatnya memang tidak dijamin pihak
+# ketiga. Yang tetap didapat: trafik terenkripsi, jadi password login dan
+# session tidak lagi lewat jaringan sebagai teks polos.
+#
+# Kalau punya domain publik yang mengarah ke server ini, ganti blok di bawah
+# dengan nama domainnya saja (tanpa tls internal) dan Caddy akan mengurus
+# sertifikat Let's Encrypt sendiri:
+#
+#   nms.contoh.co.id {
+#       reverse_proxy web:8000
+#   }
+
+{
+    admin off
+}
+
+https://{$NMS_HOST:localhost} {
+    tls internal
+
+    reverse_proxy web:8000 {
+        header_up X-Forwarded-Proto https
+    }
+
+    encode gzip
+
+    header {
+        -Server
+    }
+}
+
+# Alihkan HTTP ke HTTPS
+http://{$NMS_HOST:localhost} {
+    redir https://{host}{uri} permanent
+}

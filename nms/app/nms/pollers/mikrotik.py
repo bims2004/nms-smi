@@ -28,7 +28,9 @@ def poll_pppoe_customers(device: dict, customers: list) -> dict:
         api = connect(
             host=str(device["ip"]),
             username=device["api_username"],
-            password=device["api_password"] or "",
+            # Didekripsi di sini, sedekat mungkin dengan pemakaian —
+            # supaya plaintext-nya tidak berkeliaran di struktur data.
+            password=crypto.dekripsi(device["api_password"]) or "",
             port=device["api_port"] or 8728,
             timeout=10,
         )

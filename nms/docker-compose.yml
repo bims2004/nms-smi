@@ -53,5 +53,27 @@ services:
       db:
         condition: service_healthy
 
+  # HTTPS opsional. Aktifkan dengan:  docker compose --profile https up -d
+  # Lalu di .env: HTTPS_ENABLED=1 dan WEB_BIND=127.0.0.1 supaya port 8000
+  # tidak lagi bisa diakses langsung tanpa TLS.
+  caddy:
+    image: caddy:2-alpine
+    container_name: nms-caddy
+    restart: unless-stopped
+    profiles: ["https"]
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
 volumes:
   nms-dbdata:
+  caddy_data:
+  caddy_config:
+

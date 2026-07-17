@@ -123,3 +123,23 @@ def notify_escalation(label, service_id, dev_name, dev_ip,
         f"Tandai sudah ditangani di dashboard supaya pengingat berhenti."
     )
     return send(text)
+
+
+def ping_heartbeat() -> bool:
+    """Dead man's switch: beri tahu layanan luar bahwa NMS masih hidup.
+
+    NMS yang mati tidak bisa memberi tahu siapa pun bahwa dirinya mati — itu
+    lubang yang tidak bisa ditambal dari dalam. Yang bisa dilakukan hanyalah
+    berdetak keluar secara teratur; kalau detaknya berhenti, layanan di
+    seberang yang berteriak.
+
+    Cocok dengan healthchecks.io, Uptime Kuma push monitor, cronitor, dsb.
+    """
+    if not config.HEARTBEAT_URL:
+        return False
+    try:
+        r = requests.get(config.HEARTBEAT_URL, timeout=5)
+        return r.status_code < 400
+    except requests.RequestException as e:
+        log.warning("Heartbeat gagal: %s", e)
+        return False

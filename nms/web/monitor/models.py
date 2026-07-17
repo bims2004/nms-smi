@@ -5,6 +5,8 @@ Django tidak akan membuat/mengubah tabelnya. Ini menjaga collector dan
 alerter tetap jalan tanpa perubahan.
 """
 from django.core.exceptions import ValidationError
+
+from . import crypto
 from django.db import models
 
 VENDOR_CHOICES = [
@@ -28,6 +30,11 @@ STATUS_CHOICES = [
     ("up", "Up"),
     ("down", "Down"),
     ("unknown", "Belum diketahui"),
+]
+
+DIRECTION_CHOICES = [
+    ("ke_pelanggan", "Port menghadap pelanggan (umum)"),
+    ("ke_upstream", "Port menghadap upstream/uplink"),
 ]
 
 SEVERITY_CHOICES = [
@@ -76,6 +83,14 @@ class Device(models.Model):
                                       null=True, editable=False)
     fail_count = models.IntegerField("Gagal berturut-turut", default=0,
                                      editable=False)
+
+    def save(self, *args, **kwargs):
+        # Dienkripsi saat menyimpan, bukan saat menampilkan. Kalau enkripsinya
+        # di lapisan tampilan, nilai yang masuk lewat jalur lain (impor,
+        # shell, skrip) akan lolos tanpa terenkripsi.
+        if self.api_password:
+            self.api_password = crypto.enkripsi(self.api_password)
+        super().save(*args, **kwargs)
 
     class Meta:
         managed = False
@@ -127,6 +142,14 @@ class Customer(models.Model):
         "Ambang traffic (bps)", default=1000,
         help_text="Traffic in+out di bawah nilai ini dihitung sebagai down.",
     )
+    if_direction = models.CharField(
+        "Arah port", max_length=20, choices=DIRECTION_CHOICES,
+        default="ke_pelanggan",
+        help_text="Menentukan mana yang disebut download dan mana upload. "
+                  "SNMP mencatat dari sudut pandang PERANGKAT: di port yang "
+                  "menghadap pelanggan, trafik masuk ke port justru upload "
+                  "pelanggan. Tidak berlaku untuk PPPoE.",
+    )
     baseline_enabled = models.BooleanField(
         "Deteksi degradasi", default=False,
         help_text="Bandingkan traffic dengan kebiasaan pelanggan ini pada "
@@ -156,6 +179,24 @@ class Customer(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def flip_arah(self) -> bool:
+        """True kalau in/out mentah perlu ditukar untuk sudut pandang pelanggan.
+
+        Counter SNMP selalu disimpan apa adanya: in_bps = ifInOctets, yaitu
+        trafik MASUK KE PORT. Di port yang menghadap pelanggan, itu berarti
+        trafik yang datang dari pelanggan — upload-nya, bukan download.
+
+        Database menyimpan counter mentah; penerjemahan hanya terjadi saat
+        menampilkan. Kalau in/out ditukar saat menyimpan, data lama tidak bisa
+        ditafsirkan lagi begitu setelan ini berubah.
+
+        PPPoE tidak pernah perlu ditukar: poller Mikrotik sudah memetakan
+        tx/rx ke sudut pandang pelanggan sejak awal.
+        """
+        return (self.monitor_type == "snmp_if"
+                and self.if_direction == "ke_pelanggan")
 
     def clean(self):
         """Cocokkan dengan CHECK constraint chk_monitor di database."""

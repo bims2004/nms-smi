@@ -688,9 +688,19 @@ dalam jendela pemeliharaan juga tidak pernah membunyikan alarm.
 
 # Grafik realtime
 
-Grafik detail pelanggan menyegarkan diri sendiri untuk rentang **1 jam, 6 jam,
-dan 24 jam**. Titik hijau di kanan pemilih periode menandakan sedang aktif,
-dan labelnya menampilkan jam sampel terakhir yang masuk.
+Tombol **Live** di deretan pemilih periode. Nyala secara default untuk rentang
+pendek — **15 menit, 1 jam, 6 jam, 24 jam** — dan bisa dimatikan. Pilihannya
+diingat browser.
+
+Saat nyala, titiknya berdenyut hijau dan label kanan menampilkan jam sampel
+terakhir yang masuk. Kalau server bermasalah, tombolnya berubah merah.
+
+Rentang **15 menit** ditambahkan khusus untuk memelototi traffic saat
+troubleshooting.
+
+Untuk rentang 7 hari ke atas dan mode tanggal, tombolnya **disembunyikan**,
+bukan ditampilkan dalam keadaan mati — tombol yang tidak bisa diklik cuma
+bikin bingung.
 
 ## Batasan yang tidak bisa diakali
 
@@ -729,3 +739,230 @@ jadi 2 menit supaya tidak terus menghantam server yang sedang susah. Titiknya
 berubah merah. Saat tab dibuka kembali, grafik langsung disegarkan — browser
 memperlambat timer di tab tersembunyi, jadi tanpa ini yang terlihat pertama
 kali adalah data basi.
+
+## Catatan: bug komentar template
+
+Versi pertama fitur ini mencetak komentar template mentah ke halaman —
+`{# Dipakai dua tempat: ... #}` muncul sebagai teks di atas panel statistik
+dan grafik.
+
+Sebabnya: sintaks `{# ... #}` Django **hanya berlaku untuk satu baris**.
+Komentar yang membentang dua baris tidak dianggap komentar sama sekali.
+Yang multi-baris harus `{% comment %}...{% endcomment %}`.
+
+Kenapa lolos: pengujian saat itu memeriksa isi JSON, kesamaan SVG, dan status
+HTTP — semuanya lulus, karena teks liar tidak merusak satu pun dari itu. Tidak
+ada yang melihat halamannya.
+
+Penjaganya sekarang ada di `web/monitor/tests.py`:
+
+```bash
+docker compose exec web python manage.py test monitor
+```
+
+Uji itu memindai semua template dan menolak komentar `{# #}` multi-baris, plus
+memastikan semua template bisa di-parse. Sudah dibuktikan menangkap bug yang
+sengaja disisipkan.
+
+---
+
+# Ketahanan, skala, dan pengamanan
+
+## Arah port in/out
+
+`ifInOctets` bermakna dari sudut pandang **perangkat**, bukan pelanggan. Di
+port yang menghadap pelanggan, "in" = masuk ke port = datang dari pelanggan =
+**upload** pelanggan. Versi sebelumnya melabelinya "Download (in)" — terbalik.
+
+Sekarang ada setelan **Arah port** per pelanggan (Kelola → Pelanggan):
+
+| Setelan | Download | Upload |
+|---|---|---|
+| Port menghadap pelanggan (default) | ifOut | ifIn |
+| Port menghadap upstream/uplink | ifIn | ifOut |
+
+PPPoE tidak terpengaruh — poller Mikrotik sudah memetakan tx/rx ke sudut
+pandang pelanggan sejak awal.
+
+**Counter di database tetap mentah** (`in_bps` = ifIn, selalu). Penerjemahan
+hanya terjadi saat menampilkan, di satu fungsi (`flip_series`). Kalau in/out
+ditukar saat menyimpan, data lama tidak bisa ditafsirkan lagi begitu setelan
+berubah. Kalau penukaran disebar ke banyak tempat, cepat atau lambat ada yang
+tertukar dua kali — dan salah semacam itu tidak kelihatan: angkanya tetap
+masuk akal, cuma terbalik.
+
+Periksa data lama setelah upgrade: kalau grafik pelanggan menunjukkan upload
+jauh lebih besar dari download, kemungkinan arahnya perlu diganti.
+
+## Polling paralel
+
+Perangkat sekarang di-poll bersamaan (`POLL_WORKERS`, default 8).
+
+Kenapa perlu, dengan angka: perangkat yang mati memblokir selama
+`SNMP_TIMEOUT × (retries+1)` = 10 detik. Berurutan, **6 perangkat mati
+sekaligus** sudah membuat siklus meleset dari `POLL_INTERVAL` 60 detik. Yang
+ironis: sistemnya paling lambat justru saat keadaan paling gawat — perangkat
+sehat menjawab dalam milidetik.
+
+`./scripts/diagnose.sh` menghitungnya untuk jumlah perangkatmu dan memberi
+tahu kalau `POLL_WORKERS` perlu dinaikkan.
+
+Koneksi database tetap dipegang satu thread. psycopg2 tidak aman dipakai
+beberapa thread sekaligus; thread hanya menangani I/O jaringan, penulisan
+dikembalikan ke thread utama.
+
+## Dead man's switch
+
+NMS yang mati tidak bisa memberi tahu bahwa dirinya mati. Lubang ini tidak
+bisa ditambal dari dalam — yang bisa hanya berdetak keluar.
+
+Isi `HEARTBEAT_URL` di `.env` dengan URL ping dari healthchecks.io, Uptime
+Kuma push monitor, atau cronitor. Collector menyentuhnya tiap siklus; kalau
+berhenti, layanan di seberang yang berteriak.
+
+## Laporan SLA sekarang jujur
+
+Collector mencatat detaknya ke tabel `nms_heartbeat`. Halaman SLA memeriksa
+jeda detak dan **memberi peringatan merah** kalau NMS sendiri sempat buta:
+
+> NMS sendiri tidak mencatat selama 3j 12m (4,4% dari periode), dalam 2 jeda.
+> Selama itu gangguan pelanggan tidak terdeteksi dan tidak tercatat, jadi
+> angka uptime di bawah lebih tinggi dari kenyataan.
+
+Peringatan yang sama ikut ke ekspor CSV. Angka yang menyesatkan tidak boleh
+lebih mudah disebar daripada peringatannya.
+
+Ini menambal cacat yang saya tulis sendiri di bagian SLA sebelumnya: tanpa
+pencatatan detak, semalam NMS mati terbaca sebagai "tidak ada gangguan" alias
+uptime 100% — bohong yang arahnya kebetulan menguntungkan kita sendiri.
+
+Periode sebelum pembaruan ini tidak punya catatan detak, jadi tidak bisa
+diperiksa. Halaman SLA mengatakannya terus terang, bukan berpura-pura tahu.
+
+## Backup
+
+```bash
+./scripts/backup.sh              # ke ./backups
+./scripts/backup.sh /mnt/nas     # ke folder lain
+```
+
+Otomatis tiap hari:
+
+```bash
+crontab -e
+0 2 * * * cd /home/bimma/nms-smi && ./scripts/backup.sh >> backup.log 2>&1
+```
+
+Backup yang tidak pernah diperiksa bukan backup, cuma perasaan aman. Script
+ini memverifikasi tiap hasilnya: uji integritas gzip (menangkap file terpotong
+karena disk penuh), hitung blok data, dan pastikan tabel `alerts`, `customers`,
+`devices` benar-benar ada di dalamnya. Kalau gagal, filenya dihapus dan exit
+code 1 — supaya cron mengirim email, bukan diam-diam menyimpan file rusak.
+
+Backup lebih tua dari `BACKUP_KEEP_DAYS` (default 30) dibuang otomatis.
+
+Script memperingatkan kalau backup disimpan di server yang sama dengan
+databasenya — kalau disknya mati, backup ikut hilang, justru saat paling
+dibutuhkan.
+
+Pulihkan:
+
+```bash
+./scripts/restore.sh backups/nms-20260717-020000.sql.gz
+```
+
+Restore menampilkan isi database sekarang, minta ketik `PULIHKAN`, membuat
+jaring pengaman dari keadaan sekarang, lalu menghentikan collector & alerter
+supaya tidak menulis di tengah proses.
+
+**Yang paling tidak tergantikan adalah riwayat gangguan.** Data traffic bisa
+dikumpulkan lagi mulai besok; riwayat gangguan tidak bisa — dan itu yang
+dikirim ke pelanggan.
+
+## Impor CSV
+
+Dashboard → Impor CSV. Unggah berkas atau tempel isinya.
+
+**Semua berhasil, atau tidak sama sekali.** Satu baris rusak = nol pelanggan
+masuk. Impor setengah jalan meninggalkan keadaan yang susah dirapikan: orang
+tidak tahu mana yang sudah masuk dan mana yang belum.
+
+Selalu ada pratinjau sebelum menyimpan. Validasinya memakai `full_clean()`
+yang sama persis dengan form biasa — tidak ada jalan pintas yang melewati
+aturan.
+
+Perhatikan kolom `titik`: untuk `snmp_if` isinya **ifIndex berupa angka**,
+bukan nama interface. Keduanya sering berbeda. Kalau tidak yakin, buka
+Perangkat → Lihat interface.
+
+## HTTPS
+
+```bash
+docker compose --profile https up -d
+```
+
+Lalu di `.env`: `HTTPS_ENABLED=1`, `NMS_HOST=<ip-server>`, dan
+`WEB_BIND=127.0.0.1` supaya port 8000 tidak lagi bisa diakses tanpa TLS.
+
+Caddy memakai sertifikat terbitan sendiri, karena jaringan management biasanya
+tidak punya DNS publik — dan tanpa itu Let's Encrypt tidak bisa memverifikasi
+apa pun. Browser akan memperingatkan pada kunjungan pertama. Itu jujur:
+sertifikatnya memang tidak dijamin pihak ketiga. Yang tetap didapat: password
+login dan session tidak lagi lewat jaringan sebagai teks polos.
+
+Punya domain publik? Ganti blok di `Caddyfile` dengan nama domainnya dan hapus
+`tls internal`; Caddy mengurus Let's Encrypt sendiri.
+
+**Jangan setel `HTTPS_ENABLED=1` tanpa proxy TLS di depannya.** Cookie-secure
+di server HTTP membuat login mustahil: browser mengirim cookienya, Django
+menolaknya, dan orang terjebak di halaman login tanpa pesan error apa pun.
+
+## Pengamanan lain
+
+`settings.py` sekarang memasang `X_FRAME_OPTIONS=DENY`, `nosniff`, cookie
+HttpOnly, SameSite=Lax, dan masa sesi 12 jam — dashboard NOC sering dibiarkan
+terbuka di layar dinding; sesi abadi berarti siapa pun yang lewat bisa
+memakainya.
+
+Dengan `HTTPS_ENABLED=1`, `manage.py check --deploy` bersih kecuali dua
+peringatan: HSTS preload dan include-subdomains. Keduanya sengaja dibiarkan —
+preload nyaris tidak bisa dibatalkan dan tidak pantas dipilihkan diam-diam
+oleh sebuah template.
+
+`DJANGO_ALLOWED_HOSTS` tidak lagi mencontohkan `*`. Django memperingatkan
+sendiri kalau `*` dipakai di mode produksi.
+
+## Enkripsi kredensial perangkat
+
+Password API Mikrotik disimpan terenkripsi (Fernet), bukan teks polos. Isi
+`NMS_SECRET_KEY` di `.env`:
+
+```bash
+python3 -c "import secrets;print(secrets.token_urlsafe(48))"
+```
+
+Lalu buka & simpan ulang tiap perangkat lewat dashboard. Nilai lama tanpa
+prefiks tetap terbaca, jadi tidak ada yang rusak selama peralihan.
+
+**Yang dilindungi:** backup `.sql.gz` yang bocor. Dump sering disalin ke NAS
+atau dikirim lewat chat — dan saya baru saja menyuruhmu melakukannya. Tanpa
+enkripsi, satu file backup = password semua perangkat jaringan.
+
+**Yang TIDAK dilindungi:** orang yang sudah bisa membaca `.env`. Kuncinya ada
+di sana juga. Menaruh kunci di tempat lain di server yang sama cuma memindahkan
+masalah sambil terlihat lebih aman.
+
+**Yang tetap tidak tergantikan:** pakai user read-only di perangkat.
+
+```
+/user group add name=nms-ro policy=read,api
+/user add name=nms group=nms-ro password=...
+```
+
+Kalau kredensial ini bocor, yang didapat penyerang hanyalah kemampuan membaca
+counter interface — bukan mengubah konfigurasi. Itu perlindungan yang jauh
+lebih berarti daripada enkripsi mana pun.
+
+**Jangan mengganti `NMS_SECRET_KEY`** setelah ada password tersimpan. Yang
+lama tidak akan bisa dibuka, dan sistem akan berhenti dengan pesan jelas
+(bukan diam-diam gagal login berjam-jam).

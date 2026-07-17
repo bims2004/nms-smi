@@ -9,6 +9,12 @@ SECRET_KEY = os.environ.get(
 )
 DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
 
+# Kalau dashboard diakses lewat HTTPS (lihat profil caddy di docker-compose),
+# setel HTTPS_ENABLED=1. Sengaja tidak diaktifkan otomatis: cookie-secure di
+# server yang masih HTTP membuat login mustahil — browser mengirim cookie-nya,
+# lalu Django menolaknya, dan orang terjebak di halaman login tanpa pesan error.
+HTTPS_ENABLED = os.environ.get("HTTPS_ENABLED", "0") == "1"
+
 ALLOWED_HOSTS = [
     h.strip()
     for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
@@ -101,3 +107,41 @@ LOGIN_REDIRECT_URL = "/"
 
 # Interval polling SNMP collector — dipakai untuk menentukan data basi di UI
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", 60))
+
+
+# =========================================================
+# Pengamanan
+# =========================================================
+# Berlaku selalu, tidak butuh HTTPS:
+SECURE_CONTENT_TYPE_NOSNIFF = True      # jangan tebak-tebak tipe berkas
+X_FRAME_OPTIONS = "DENY"                # cegah clickjacking lewat iframe
+SESSION_COOKIE_HTTPONLY = True          # cookie tak terbaca JavaScript
+CSRF_COOKIE_HTTPONLY = False            # dibaca fetch() di dashboard
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+
+# Sesi berakhir setelah 12 jam. Dashboard NOC sering dibiarkan terbuka di
+# layar dinding; sesi abadi berarti siapa pun yang lewat bisa memakainya.
+SESSION_COOKIE_AGE = 12 * 3600
+
+if HTTPS_ENABLED:
+    # Reverse proxy (Caddy/nginx) yang memegang TLS, Django di belakangnya
+    # bicara HTTP. Header ini yang memberitahunya bahwa aslinya HTTPS.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # HSTS: setahun, tapi TANPA preload dan TANPA subdomain.
+    # Preload itu keputusan yang nyaris tidak bisa dibatalkan dan tidak pantas
+    # dipilihkan diam-diam oleh sebuah template.
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+    SECURE_HSTS_PRELOAD = False
+
+if not DEBUG and "*" in ALLOWED_HOSTS:
+    import warnings
+    warnings.warn(
+        "DJANGO_ALLOWED_HOSTS='*' di mode produksi. Django akan menerima Host "
+        "header apa pun. Isi dengan IP/hostname server yang sebenarnya.",
+        RuntimeWarning,
+    )

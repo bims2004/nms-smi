@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -15,6 +15,7 @@ from django.utils import timezone
 from django.utils.formats import date_format
 from django.views.decorators.http import require_POST
 
+from . import importer
 from .discovery import discover_pppoe_sessions, discover_snmp_interfaces
 from .models import (ALERT_TYPE_LABEL, Alert, Customer, Device,
                      MaintenanceWindow)
@@ -33,6 +34,32 @@ def fmt_bps(v):
         if v >= div:
             return f"{v / div:.2f} {unit}"
     return f"{int(v)} bps"
+
+
+def flip_series(series):
+    """Tukar kolom in/out pada hasil fetch_series.
+
+    Dipanggil sekali, tepat setelah data diambil. Setelah ini semua yang di
+    hilir — grafik, statistik, puncak — memakai sudut pandang pelanggan dan
+    tidak perlu tahu-menahu soal arah port. Menukar di beberapa tempat berisiko
+    tertukar dua kali, dan salah semacam itu tidak kelihatan: angkanya tetap
+    masuk akal, cuma tertukar.
+    """
+    return [(r[0], r[2], r[1], r[4], r[3], r[5]) for r in series]
+
+
+def arah_bps(customer, in_v, out_v):
+    """Terjemahkan counter mentah ke sudut pandang pelanggan.
+
+    Kembalikan (download, upload). Counter di database selalu mentah:
+    in = ifInOctets = masuk ke port. Di port yang menghadap pelanggan, itu
+    justru upload pelanggan — makanya perlu ditukar.
+
+    Semua tampilan memanggil fungsi ini. Kalau penerjemahannya disebar ke
+    banyak tempat, cepat atau lambat ada satu yang terlewat dan angkanya
+    bertentangan antar-halaman.
+    """
+    return (out_v, in_v) if customer.flip_arah else (in_v, out_v)
 
 
 def fmt_bytes(v):
@@ -176,11 +203,12 @@ def build_rows():
         if s and s["in_bps"] is not None and s["out_bps"] is not None:
             total = s["in_bps"] + s["out_bps"]
 
+        dl, ul = arah_bps(c, s["in_bps"], s["out_bps"]) if s else (None, None)
         rows.append({
             "obj": c,
             "state": state,
-            "in_bps": fmt_bps(s["in_bps"]) if s else "—",
-            "out_bps": fmt_bps(s["out_bps"]) if s else "—",
+            "in_bps": fmt_bps(dl) if s else "—",
+            "out_bps": fmt_bps(ul) if s else "—",
             "total_raw": total,
             "last_seen": s["time"] if s else None,
             "spark": sparkline_svg(sparks.get(c.id, [])),
@@ -255,6 +283,7 @@ def status_json(request):
 
 # Rentang yang bisa dipilih: (kode, label, jumlah jam, ukuran bucket)
 RANGES = [
+    ("15m", "15 menit", 0.25, "1 minute"),
     ("1h",  "1 jam",    1,    "1 minute"),
     ("6h",  "6 jam",    6,    "1 minute"),
     ("24h", "24 jam",   24,   "5 minutes"),
@@ -350,7 +379,7 @@ def rollup_available():
         return cur.fetchone()[0]
 
 
-def volume_bytes(customer_id, period, use_rollup):
+def volume_bytes(customer_id, period, use_rollup, flip=False):
     """Volume data terpakai, dalam byte.
 
     Dihitung dari jarak waktu tiap sampel ke sampel sebelumnya, bukan dari
@@ -392,18 +421,20 @@ def volume_bytes(customer_id, period, use_rollup):
                 (customer_id, period["start"], period["end"]),
             )
         row = cur.fetchone()
-    return (float(row[0]) if row and row[0] is not None else 0.0,
-            float(row[1]) if row and row[1] is not None else 0.0)
+    vin = float(row[0]) if row and row[0] is not None else 0.0
+    vout = float(row[1]) if row and row[1] is not None else 0.0
+    # Query di atas membaca counter mentah, jadi penukarannya di sini.
+    return (vout, vin) if flip else (vin, vout)
 
 
-def usage_stats(customer_id, period, series, use_rollup):
+def usage_stats(customer_id, period, series, use_rollup, flip=False):
     """Hitung pemakaian: volume, rata-rata, puncak, dan 95th percentile."""
     ins = [r[1] for r in series if r[1] is not None]
     outs = [r[2] for r in series if r[2] is not None]
     if not ins and not outs:
         return None
 
-    vol_in, vol_out = volume_bytes(customer_id, period, use_rollup)
+    vol_in, vol_out = volume_bytes(customer_id, period, use_rollup, flip)
 
     # 95th percentile: cara penagihan yang lazim di ISP. Dihitung dari
     # rata-rata 5 menit, ambil nilai in/out yang lebih besar tiap interval.
@@ -447,8 +478,9 @@ def customer_detail(request, pk):
     c = get_object_or_404(Customer.objects.select_related("device"), pk=pk)
     period = parse_period(request)
     series, from_rollup = fetch_series(c.id, period)
-
-    stats = usage_stats(c.id, period, series, from_rollup)
+    if c.flip_arah:
+        series = flip_series(series)
+    stats = usage_stats(c.id, period, series, from_rollup, c.flip_arah)
     chart = build_chart(series, period)
 
     alerts = list(Alert.objects.filter(customer=c)[:20])
@@ -632,6 +664,56 @@ def month_bounds(year, month):
     return start, min(end, now)
 
 
+def nms_blind_seconds(start, end):
+    """Berapa lama NMS sendiri tidak mencatat apa pun dalam periode ini.
+
+    Ini yang membuat laporan SLA jujur. Tanpa ini, semalam NMS mati terbaca
+    sebagai "tidak ada gangguan" alias uptime 100% — bohong yang arahnya
+    kebetulan menguntungkan kita sendiri, dan itu jenis bohong yang paling
+    berbahaya di laporan yang dikirim ke pelanggan.
+    """
+    with connection.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.nms_heartbeat') IS NOT NULL")
+        if not cur.fetchone()[0]:
+            return None, 0
+
+        # Jeda antar-detak yang lebih dari 5 menit dianggap NMS sedang mati.
+        cur.execute(
+            """
+            SELECT coalesce(sum(gap), 0), count(*)
+            FROM (
+                SELECT EXTRACT(EPOCH FROM (
+                           time - lag(time) OVER (ORDER BY time)
+                       )) AS gap
+                FROM nms_heartbeat
+                WHERE component = 'collector' AND time >= %s AND time <= %s
+            ) x
+            WHERE gap > 300
+            """,
+            (start, end),
+        )
+        row = cur.fetchone()
+        blind, gaps = float(row[0] or 0), int(row[1] or 0)
+
+        # Detak pertama jauh setelah awal periode = NMS belum jalan
+        cur.execute(
+            """SELECT min(time), max(time) FROM nms_heartbeat
+               WHERE component = 'collector' AND time >= %s AND time <= %s""",
+            (start, end),
+        )
+        first, last = cur.fetchone()
+        if first is None:
+            return None, 0          # belum ada data detak sama sekali
+        lead = (first - start).total_seconds()
+        if lead > 300:
+            blind += lead; gaps += 1
+        tail = (end - last).total_seconds()
+        if tail > 300:
+            blind += tail; gaps += 1
+
+        return blind, gaps
+
+
 def sla_rows(year, month, include_maintenance):
     """Hitung downtime & uptime tiap pelanggan untuk satu bulan."""
     start, end = month_bounds(year, month)
@@ -694,6 +776,7 @@ def sla_report(request):
 
     include_mt = request.GET.get("maintenance") == "1"
     rows, start, end, window = sla_rows(year, month, include_mt)
+    blind, blind_gaps = nms_blind_seconds(start, end)
 
     if request.GET.get("format") == "csv":
         resp = HttpResponse(content_type="text/csv; charset=utf-8")
@@ -702,6 +785,13 @@ def sla_report(request):
         )
         resp.write("\ufeff")  # BOM supaya Excel membaca UTF-8 dengan benar
         w = csv.writer(resp)
+        if blind:
+            # Peringatan ini ikut ke Excel juga. Angka yang menyesatkan tidak
+            # boleh lebih mudah disebar daripada peringatannya.
+            w.writerow([f"PERINGATAN: NMS tidak mencatat selama "
+                        f"{fmt_duration(timedelta(seconds=blind))} "
+                        f"({100*blind/window:.1f}% periode). Uptime di bawah "
+                        f"ini lebih tinggi dari kenyataan."])
         w.writerow(["ID layanan", "Pelanggan", "Perangkat", "Titik monitor",
                     "Jumlah gangguan", "Total down (detik)", "Total down",
                     "Uptime (%)"])
@@ -733,6 +823,11 @@ def sla_report(request):
         "window_fmt": fmt_duration(timedelta(seconds=window)),
         "include_mt": include_mt,
         "breaches": sum(1 for r in rows if r["breach"]),
+        "blind_fmt": (fmt_duration(timedelta(seconds=blind))
+                      if blind else None),
+        "blind_pct": f"{100 * blind / window:.1f}" if blind and window else None,
+        "blind_gaps": blind_gaps,
+        "blind_unknown": blind is None,
         "nav": "sla",
     })
 
@@ -750,7 +845,9 @@ def customer_live(request, pk):
     c = get_object_or_404(Customer.objects.select_related("device"), pk=pk)
     period = parse_period(request)
     series, from_rollup = fetch_series(c.id, period)
-    stats = usage_stats(c.id, period, series, from_rollup)
+    if c.flip_arah:
+        series = flip_series(series)
+    stats = usage_stats(c.id, period, series, from_rollup, c.flip_arah)
     chart = build_chart(series, period)
 
     ctx = {"c": c, "chart": chart, "stats": stats, "period": period,
@@ -815,3 +912,50 @@ def device_list(request):
             starts_at__lte=now, ends_at__gte=now
         ).select_related("device", "customer"),
     })
+
+
+@login_required
+def customer_import(request):
+    """Impor pelanggan dari CSV — semua berhasil, atau tidak sama sekali."""
+    if not request.user.has_perm("monitor.add_customer"):
+        return redirect("dashboard")
+
+    ctx = {"nav": "dashboard", "kolom": importer.KOLOM, "contoh": importer.CONTOH}
+
+    if request.method != "POST":
+        return render(request, "monitor/import.html", ctx)
+
+    teks = ""
+    if request.FILES.get("berkas"):
+        raw = request.FILES["berkas"].read()
+        for enc in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                teks = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+    else:
+        teks = request.POST.get("teks", "")
+
+    if not teks.strip():
+        ctx["errors"] = ["Belum ada file atau teks CSV yang diisi."]
+        return render(request, "monitor/import.html", ctx)
+
+    objek, errors = importer.parse_csv(teks)
+    ctx.update({"errors": errors, "objek": objek, "teks": teks})
+
+    if errors:
+        # Satu baris rusak = tidak ada yang masuk. Impor setengah jalan
+        # meninggalkan keadaan yang susah dirapikan.
+        ctx["gagal_total"] = True
+        return render(request, "monitor/import.html", ctx)
+
+    if request.POST.get("aksi") != "simpan":
+        ctx["pratinjau"] = True
+        return render(request, "monitor/import.html", ctx)
+
+    with transaction.atomic():
+        for c in objek:
+            c.save()
+    messages.success(request, f"{len(objek)} pelanggan berhasil diimpor.")
+    return redirect("dashboard")
