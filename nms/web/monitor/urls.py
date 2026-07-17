@@ -6,6 +6,7 @@ urlpatterns = [
     path("", views.dashboard, name="dashboard"),
     path("api/status/", views.status_json, name="status_json"),
     path("pelanggan/<int:pk>/", views.customer_detail, name="customer_detail"),
+    path("pelanggan/<int:pk>/live/", views.customer_live, name="customer_live"),
     path("perangkat/", views.device_list, name="device_list"),
     path("perangkat/<int:pk>/interface/", views.device_interfaces,
          name="device_interfaces"),

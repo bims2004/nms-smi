@@ -5,9 +5,11 @@
 <div class="page-head">
   <h1>Status pelanggan</h1>
   <span class="sub mono" id="stamp">memuat…</span>
-  <span class="sub" style="margin-left:auto">
-    {{ device_count }} perangkat aktif ·
-    <a href="/admin/monitor/customer/add/">Tambah pelanggan</a>
+  <span class="sub" style="margin-left:auto;display:flex;gap:12px;
+        align-items:center;flex-wrap:wrap">
+    {% include "monitor/_alarm.html" %}
+    <span>{{ device_count }} perangkat aktif ·
+      <a href="/admin/monitor/customer/add/">Tambah pelanggan</a></span>
   </span>
 </div>
 
@@ -100,6 +102,7 @@
             : row.state === 'unknown' ? 'menunggu sampel' : 'normal';
         });
         stamp.textContent = 'diperbarui ' + d.updated;
+        if (window.NmsAlarmFeed) window.NmsAlarmFeed(d.alerts);
       })
       .catch(function(){ stamp.textContent = 'gagal memuat — mencoba lagi'; });
   }

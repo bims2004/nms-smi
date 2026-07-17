@@ -1,0 +1,49 @@
+{% load l10n %}
+{# Dipakai dua tempat: render awal halaman, dan endpoint live.
+   Grafik tetap dirender di server — tidak ada logika penggambaran yang
+   diduplikasi di JavaScript, jadi tidak bisa berbeda antara keduanya. #}
+{% if chart %}
+{% localize off %}
+<svg class="chart" viewBox="0 0 {{ chart.width }} {{ chart.height }}"
+     style="width:100%;height:auto;display:block"
+     xmlns="http://www.w3.org/2000/svg">
+  {% for g in chart.grid %}
+  <line x1="{{ chart.pad_l }}" y1="{{ g.y }}"
+        x2="{{ chart.width|add:-12 }}" y2="{{ g.y }}"
+        stroke="var(--hairline)" stroke-width="1"/>
+  <text x="{{ chart.pad_l|add:3 }}" y="{{ g.y_label }}" text-anchor="start">{{ g.label }}</text>
+  {% endfor %}
+
+  <path d="{{ chart.in_path }}" fill="none" stroke="var(--blue)"
+        stroke-width="1.5" stroke-linejoin="round"/>
+  <path d="{{ chart.out_path }}" fill="none" stroke="var(--orange)"
+        stroke-width="1.5" stroke-linejoin="round"/>
+
+  {% for l in chart.labels %}
+  <text x="{{ l.x }}" y="{{ chart.height|add:-8 }}" text-anchor="{{ l.anchor }}">{{ l.t }}</text>
+  {% endfor %}
+</svg>
+{% endlocalize %}
+
+<div style="display:flex;gap:16px;padding-top:10px;font-size:11px;
+            color:var(--muted);align-items:center;flex-wrap:wrap">
+  <span><span style="display:inline-block;width:14px;height:2px;
+        background:var(--blue);vertical-align:middle"></span>
+    Download (in)</span>
+  <span><span style="display:inline-block;width:14px;height:2px;
+        background:var(--orange);vertical-align:middle"></span>
+    Upload (out)</span>
+  {% if from_rollup %}
+  <span class="tag" style="margin-left:auto">dari rollup jam-an</span>
+  {% endif %}
+</div>
+{% else %}
+<div class="empty">
+  <h2>Tidak ada data di periode ini</h2>
+  <p>{% if period.mode == "date" %}Belum ada sampel traffic yang tercatat
+     pada {{ period.label }}. Kalau tanggalnya lebih dari 90 hari lalu,
+     sampel mentahnya sudah kedaluwarsa.
+     {% else %}Collector belum sempat mengambil sampel, atau perangkat
+     tidak merespon.{% endif %}</p>
+</div>
+{% endif %}

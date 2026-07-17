@@ -10,6 +10,7 @@ from django.db import connection
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.formats import date_format
 from django.views.decorators.http import require_POST
@@ -217,9 +218,28 @@ def status_json(request):
     counts = {"up": 0, "down": 0, "stale": 0, "unknown": 0, "disabled": 0}
     for r in rows:
         counts[r["state"]] += 1
+
+    # Daftar gangguan yang sedang terbuka. Frontend membandingkan id-nya
+    # dengan yang sudah pernah dilihat untuk memutuskan kapan membunyikan
+    # alarm — jadi alarm hanya berbunyi untuk gangguan BARU, bukan tiap
+    # kali halaman menyegarkan diri.
+    alerts = []
+    for a in (Alert.objects
+              .filter(resolved_at__isnull=True, suppressed=False)
+              .select_related("customer", "device")
+              .order_by("-started_at")[:50]):
+        alerts.append({
+            "id": a.id,
+            "severity": a.severity,
+            "type": ALERT_TYPE_LABEL.get(a.alert_type, a.alert_type),
+            "subject": a.subject,
+            "acked": a.ack_at is not None,
+        })
+
     return JsonResponse({
         "counts": counts,
         "updated": timezone.localtime().strftime("%H:%M:%S"),
+        "alerts": alerts,
         "rows": [
             {
                 "id": r["obj"].id,
@@ -714,6 +734,36 @@ def sla_report(request):
         "include_mt": include_mt,
         "breaches": sum(1 for r in rows if r["breach"]),
         "nav": "sla",
+    })
+
+
+@login_required
+def customer_live(request, pk):
+    """Potongan grafik & statistik terbaru, untuk refresh tanpa reload.
+
+    Sengaja memakai ulang parse_period/fetch_series/usage_stats/build_chart
+    yang sama persis dengan customer_detail, lalu merender partial yang sama.
+    Kalau logikanya diduplikasi di JavaScript, cepat atau lambat grafik live
+    akan berbeda dari grafik hasil reload — dan selisih semacam itu susah
+    dilacak.
+    """
+    c = get_object_or_404(Customer.objects.select_related("device"), pk=pk)
+    period = parse_period(request)
+    series, from_rollup = fetch_series(c.id, period)
+    stats = usage_stats(c.id, period, series, from_rollup)
+    chart = build_chart(series, period)
+
+    ctx = {"c": c, "chart": chart, "stats": stats, "period": period,
+           "from_rollup": from_rollup}
+    return JsonResponse({
+        "stats_html": (render_to_string("monitor/_stats.html", ctx, request)
+                       if stats else ""),
+        "chart_html": render_to_string("monitor/_chart.html", ctx, request),
+        "has_stats": stats is not None,
+        "status": c.status,
+        "updated": timezone.localtime().strftime("%H:%M:%S"),
+        "latest": (timezone.localtime(series[-1][0]).strftime("%H:%M:%S")
+                   if series else None),
     })
 
 

@@ -58,98 +58,20 @@
   {% endif %}
 
   <span class="mono" style="margin-left:auto;font-size:12px;color:var(--dim)">
-    {{ period.label }}</span>
+    <span id="liveDot" hidden style="color:var(--green)">&#9679;</span>
+    <span id="liveTxt">{{ period.label }}</span></span>
 </div>
 
 {# ---------- pemakaian ---------- #}
 {% if stats %}
-<div class="panel" style="padding:14px;margin-bottom:14px">
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-              gap:14px">
-    <div>
-      <div style="font-size:10px;color:var(--dim);letter-spacing:.08em">
-        VOLUME TOTAL</div>
-      <div class="mono" style="font-size:19px;font-weight:600;margin-top:3px">
-        {{ stats.vol_total }}</div>
-      <div class="mono stat-sub" style="font-size:11px;color:var(--muted);margin-top:2px">
-        &darr; {{ stats.vol_in }} &nbsp; &uarr; {{ stats.vol_out }}</div>
-    </div>
-    <div>
-      <div style="font-size:10px;color:var(--dim);letter-spacing:.08em">
-        RATA-RATA</div>
-      <div class="mono" style="font-size:15px;margin-top:5px;color:var(--blue)">
-        &darr; {{ stats.avg_in }}</div>
-      <div class="mono" style="font-size:15px;color:var(--orange)">
-        &uarr; {{ stats.avg_out }}</div>
-    </div>
-    <div>
-      <div style="font-size:10px;color:var(--dim);letter-spacing:.08em">
-        PUNCAK</div>
-      <div class="mono" style="font-size:15px;margin-top:5px;color:var(--blue)">
-        &darr; {{ stats.peak_in }}</div>
-      <div class="mono" style="font-size:15px;color:var(--orange)">
-        &uarr; {{ stats.peak_out }}</div>
-    </div>
-    <div>
-      <div style="font-size:10px;color:var(--dim);letter-spacing:.08em"
-           title="Nilai yang dilampaui hanya 5% waktu. Dasar penagihan yang lazim di ISP.">
-        95TH PERCENTILE</div>
-      <div class="mono" style="font-size:19px;font-weight:600;margin-top:3px">
-        {{ stats.p95|default:"—" }}</div>
-      <div class="mono" style="font-size:11px;color:var(--dim);margin-top:2px">
-        {% if stats.p95_stale %}maks 90 hari terakhir{% else %}rata-rata 5 menit{% endif %}</div>
-    </div>
-  </div>
+<div class="panel" style="padding:14px;margin-bottom:14px" id="statsBox">
+  {% include "monitor/_stats.html" %}
 </div>
 {% endif %}
 
 {# ---------- grafik ---------- #}
-<div class="panel" style="padding:14px">
-  {% if chart %}
-  {% localize off %}
-  <svg class="chart" viewBox="0 0 {{ chart.width }} {{ chart.height }}"
-       style="width:100%;height:auto;display:block"
-       xmlns="http://www.w3.org/2000/svg">
-    {% for g in chart.grid %}
-    <line x1="{{ chart.pad_l }}" y1="{{ g.y }}"
-          x2="{{ chart.width|add:-12 }}" y2="{{ g.y }}"
-          stroke="var(--hairline)" stroke-width="1"/>
-    <text x="{{ chart.pad_l|add:3 }}" y="{{ g.y_label }}" text-anchor="start">{{ g.label }}</text>
-    {% endfor %}
-
-    <path d="{{ chart.in_path }}" fill="none" stroke="var(--blue)"
-          stroke-width="1.5" stroke-linejoin="round"/>
-    <path d="{{ chart.out_path }}" fill="none" stroke="var(--orange)"
-          stroke-width="1.5" stroke-linejoin="round"/>
-
-    {% for l in chart.labels %}
-    <text x="{{ l.x }}" y="{{ chart.height|add:-8 }}" text-anchor="{{ l.anchor }}">{{ l.t }}</text>
-    {% endfor %}
-  </svg>
-  {% endlocalize %}
-
-  <div style="display:flex;gap:16px;padding-top:10px;font-size:11px;
-              color:var(--muted);align-items:center;flex-wrap:wrap">
-    <span><span style="display:inline-block;width:14px;height:2px;
-          background:var(--blue);vertical-align:middle"></span>
-      Download (in)</span>
-    <span><span style="display:inline-block;width:14px;height:2px;
-          background:var(--orange);vertical-align:middle"></span>
-      Upload (out)</span>
-    {% if from_rollup %}
-    <span class="tag" style="margin-left:auto">dari rollup jam-an</span>
-    {% endif %}
-  </div>
-  {% else %}
-  <div class="empty">
-    <h2>Tidak ada data di periode ini</h2>
-    <p>{% if period.mode == "date" %}Belum ada sampel traffic yang tercatat
-       pada {{ period.label }}. Kalau tanggalnya lebih dari 90 hari lalu,
-       sampel mentahnya sudah kedaluwarsa.
-       {% else %}Collector belum sempat mengambil sampel, atau perangkat
-       tidak merespon.{% endif %}</p>
-  </div>
-  {% endif %}
+<div class="panel" style="padding:14px" id="chartBox">
+  {% include "monitor/_chart.html" %}
 </div>
 
 {# ---------- riwayat gangguan ---------- #}
@@ -183,4 +105,75 @@
     <p>Pelanggan ini belum pernah tercatat mengalami gangguan.</p></div>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block script %}
+<script>
+(function () {
+  "use strict";
+  // Realtime hanya untuk rentang pendek. Menyegarkan grafik 90 hari tiap
+  // setengah menit membebani database tanpa ada yang bisa dilihat berubah —
+  // satu titik di grafik 90 hari mewakili 6 jam.
+  var LIVE_RANGES = {"1h": 1, "6h": 1, "24h": 1};
+  var mode = "{{ period.mode }}";
+  var range = "{{ period.range|default:'' }}";
+  if (mode !== "range" || !LIVE_RANGES[range]) return;
+
+  var box   = document.getElementById("chartBox");
+  var stats = document.getElementById("statsBox");
+  var dot   = document.getElementById("liveDot");
+  var txt   = document.getElementById("liveTxt");
+  if (!box || !dot) return;
+
+  var url = "{% url 'customer_live' c.id %}?range=" + encodeURIComponent(range);
+  var label = txt.textContent.trim();
+  var gagal = 0;
+  var timer = null;
+
+  dot.hidden = false;
+
+  function tick() {
+    fetch(url, {headers: {"X-Requested-With": "fetch"}})
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        gagal = 0;
+        dot.style.color = "var(--green)";
+        box.innerHTML = d.chart_html;
+        if (stats) {
+          if (d.has_stats) {
+            stats.innerHTML = d.stats_html;
+            stats.hidden = false;
+          } else {
+            stats.hidden = true;
+          }
+        }
+        txt.textContent = label + (d.latest ? " · sampel " + d.latest : "");
+      })
+      .catch(function () {
+        gagal++;
+        dot.style.color = "var(--red)";
+        txt.textContent = label + " · gagal memuat";
+        // Kalau server bermasalah, jangan terus menghantamnya tiap 30 detik.
+        if (gagal >= 3 && timer) {
+          clearInterval(timer);
+          timer = setInterval(tick, 120000);
+        }
+      });
+  }
+
+  // Collector mengambil sampel tiap POLL_INTERVAL (default 60 detik), jadi
+  // menyegarkan lebih cepat dari itu cuma menampilkan data yang sama.
+  // 30 detik memberi jeda supaya sampel baru cepat terlihat tanpa boros.
+  timer = setInterval(tick, 30000);
+
+  // Browser memperlambat timer di tab tersembunyi. Saat tab dibuka lagi,
+  // segarkan langsung supaya yang terlihat bukan data basi.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) tick();
+  });
+})();
+</script>
 {% endblock %}

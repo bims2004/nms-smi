@@ -1,0 +1,162 @@
+{% load static %}
+<script src="{% static 'monitor/alarm.js' %}"></script>
+
+<div class="alarm-bar" id="alarmBar">
+  <button class="btn" id="alarmToggle" type="button">
+    <span id="alarmIcon">🔇</span> <span id="alarmLabel">Alarm mati</span>
+  </button>
+
+  <div class="alarm-cfg" id="alarmCfg" hidden>
+    <select id="alarmSound" title="Suara untuk gangguan major">
+      <option value="kaget">Kaget</option>
+      <option value="sirene">Sirene</option>
+      <option value="bip">Bip</option>
+    </select>
+    <input type="range" id="alarmVol" min="0" max="100" value="70"
+           title="Volume">
+    <label class="alarm-chk" title="Gangguan minor (degradasi) ikut berbunyi">
+      <input type="checkbox" id="alarmMinor"> minor
+    </label>
+    <label class="alarm-chk" title="Bunyi juga saat pelanggan pulih">
+      <input type="checkbox" id="alarmPulih" checked> pulih
+    </label>
+    <button class="btn" id="alarmTest" type="button">Tes</button>
+  </div>
+</div>
+
+<style>
+.alarm-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.alarm-cfg{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.alarm-cfg select{background:var(--surface-2);color:var(--text);
+  border:1px solid var(--hairline);border-radius:4px;padding:4px 7px;
+  font-family:var(--sans);font-size:12px}
+.alarm-cfg input[type=range]{width:76px;accent-color:var(--blue)}
+.alarm-chk{display:flex;align-items:center;gap:4px;font-size:11px;
+  color:var(--muted);cursor:pointer;user-select:none}
+.alarm-bar .btn{padding:4px 10px;font-size:12px}
+#alarmToggle.on{border-color:var(--green);color:var(--green)}
+@keyframes alarmFlash{0%,100%{background:transparent}
+  50%{background:rgba(216,72,63,.22)}}
+.alarm-flash{animation:alarmFlash .45s ease-in-out 3}
+</style>
+
+<script>
+(function () {
+  "use strict";
+  var A = window.NmsAlarm;
+  var bar = document.getElementById("alarmBar");
+  if (!A || !A.supported()) {
+    bar.innerHTML = '<span class="sub" style="font-size:11px">' +
+                    'Browser ini tidak mendukung Web Audio</span>';
+    return;
+  }
+
+  var KEY = "nms.alarm";
+  var toggle = document.getElementById("alarmToggle");
+  var icon   = document.getElementById("alarmIcon");
+  var label  = document.getElementById("alarmLabel");
+  var cfg    = document.getElementById("alarmCfg");
+  var selSnd = document.getElementById("alarmSound");
+  var volEl  = document.getElementById("alarmVol");
+  var chkMin = document.getElementById("alarmMinor");
+  var chkPul = document.getElementById("alarmPulih");
+  var testEl = document.getElementById("alarmTest");
+
+  var st = {on: false, sound: "kaget", vol: 70, minor: false, pulih: true};
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    Object.keys(st).forEach(function (k) {
+      if (saved[k] !== undefined) st[k] = saved[k];
+    });
+  } catch (e) { /* localStorage diblok/penuh — pakai default saja */ }
+
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) {}
+  }
+
+  function render() {
+    toggle.classList.toggle("on", st.on);
+    icon.textContent = st.on ? "🔔" : "🔇";
+    label.textContent = st.on ? "Alarm nyala" : "Alarm mati";
+    cfg.hidden = !st.on;
+    selSnd.value = st.sound;
+    volEl.value = st.vol;
+    chkMin.checked = st.minor;
+    chkPul.checked = st.pulih;
+  }
+
+  toggle.addEventListener("click", function () {
+    st.on = !st.on;
+    // Membuka kunci audio HARUS terjadi di dalam handler klik.
+    // Browser mengabaikan resume() yang dipanggil dari timer.
+    if (st.on) {
+      A.unlock();
+      A.play(st.sound, st.vol / 100);
+    }
+    save(); render();
+  });
+
+  selSnd.addEventListener("change", function () {
+    st.sound = selSnd.value; save();
+    A.play(st.sound, st.vol / 100);
+  });
+  volEl.addEventListener("change", function () {
+    st.vol = parseInt(volEl.value, 10); save();
+    A.play(st.sound, st.vol / 100);
+  });
+  chkMin.addEventListener("change", function () { st.minor = chkMin.checked; save(); });
+  chkPul.addEventListener("change", function () { st.pulih = chkPul.checked; save(); });
+  testEl.addEventListener("click", function () {
+    A.unlock(); A.play(st.sound, st.vol / 100);
+  });
+
+  render();
+
+  /* ---------- deteksi gangguan baru ---------- */
+  var seen = null;   // null = pemuatan pertama, belum ada pembanding
+
+  window.NmsAlarmFeed = function (alerts) {
+    var ids = {};
+    var baru = [];
+    (alerts || []).forEach(function (a) {
+      ids[a.id] = a;
+      if (seen && !seen[a.id]) baru.push(a);
+    });
+
+    var pulih = [];
+    if (seen) {
+      Object.keys(seen).forEach(function (id) {
+        if (!ids[id]) pulih.push(seen[id]);
+      });
+    }
+
+    // Pemuatan pertama cuma mengisi daftar. Tanpa ini, membuka dashboard
+    // saat ada 30 gangguan lama akan langsung membunyikan alarm 30 kali.
+    var pertama = (seen === null);
+    seen = ids;
+    if (pertama || !st.on) return;
+
+    var major = baru.filter(function (a) { return a.severity === "major"; });
+    var minor = baru.filter(function (a) { return a.severity !== "major"; });
+
+    if (major.length) {
+      A.play(st.sound, st.vol / 100);
+      flash();
+    } else if (minor.length && st.minor) {
+      A.play("bip", st.vol / 100 * 0.7);
+    }
+    if (pulih.length && st.pulih) {
+      // Beri jarak supaya tidak bertabrakan dengan suara gangguan
+      setTimeout(function () { A.play("pulih", st.vol / 100); },
+                 major.length ? 900 : 0);
+    }
+  };
+
+  function flash() {
+    var b = document.querySelector(".tally") || document.body;
+    b.classList.remove("alarm-flash");
+    void b.offsetWidth;              // paksa reflow supaya animasi terulang
+    b.classList.add("alarm-flash");
+  }
+})();
+</script>

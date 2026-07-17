@@ -600,3 +600,132 @@ Verifikasi setelah migrasi:
 ```bash
 ./scripts/diagnose.sh          # lihat bagian Penyimpanan
 ```
+
+---
+
+# Alarm suara di dashboard
+
+Dashboard bisa membunyikan alarm saat ada gangguan **baru**. Berguna kalau
+dashboard dipasang di layar dinding NOC dan tidak ada yang memelototinya
+terus-menerus.
+
+Tombol **Alarm** ada di kepala halaman Status pelanggan.
+
+## Suaranya disintesis, bukan file
+
+Semua suara dibangkitkan lewat Web Audio API — tidak ada file audio, tidak ada
+request keluar. Dua alasan:
+
+1. Dashboard ini harus tetap jalan di jaringan management yang terisolasi.
+   Ini konsisten dengan keputusan sejak Fase 2: grafik pun dirender di server,
+   tanpa library dari CDN.
+2. Sampel suara meme yang beredar (vine boom, airhorn, dan sejenisnya) adalah
+   materi berhak cipta. Saya tidak membundelnya.
+
+Pilihan yang tersedia:
+
+| Suara | Bentuk | Untuk |
+|---|---|---|
+| **Kaget** | hentakan tajam lalu jatuh ke bass ~38 Hz | bikin kaget, default untuk major |
+| **Sirene** | dua nada bergantian, 4 siklus | alarm ruang kontrol klasik |
+| **Bip** | tiga nada pendek | buat yang tidak mau kaget |
+| **Pulih** | dua nada naik | otomatis saat gangguan hilang |
+
+"Pulih" sengaja dibuat berbeda jauh dari suara gangguan — supaya tidak perlu
+melihat layar untuk tahu itu kabar baik.
+
+## Kalau mau pakai file sendiri
+
+Taruh file di `web/monitor/static/monitor/alarm/`, lalu panggil dari console
+browser atau tambahkan ke `_alarm.html`:
+
+```js
+NmsAlarm.setCustom('/static/monitor/alarm/punya-saya.mp3');
+```
+
+Lalu tambahkan `<option value="custom">Punya sendiri</option>` ke `#alarmSound`.
+
+Lisensi file yang kamu pasang jadi tanggung jawabmu — kalau dashboard ini cuma
+dipakai internal NOC, risikonya kecil, tapi itu keputusanmu, bukan saya.
+
+## Pengaturan
+
+Tersimpan di browser (localStorage), per-perangkat. Operator di layar dinding
+bisa menyalakan alarm tanpa memaksa semua orang mendengarnya.
+
+- **Suara** — pilihan untuk gangguan major
+- **Volume**
+- **minor** — gangguan degradasi ikut berbunyi (default: mati)
+- **pulih** — bunyi saat pelanggan kembali normal (default: nyala)
+- **Tes** — coba suaranya
+
+## Yang perlu diketahui sebelum dipakai serius
+
+**Alarm ini pelengkap Telegram, bukan pengganti.** Dia hanya berbunyi kalau ada
+browser yang membuka dashboard. Browser ditutup, laptop tidur, atau operator
+pulang — alarm mati total. Telegram tetap jalur yang bisa diandalkan.
+
+**Tab latar belakang membuat alarm terlambat.** Browser memperlambat timer di
+tab yang tidak aktif, kadang sampai sekali per menit. Dashboard menyegarkan
+tiap 20 detik saat tab aktif, jadi kalau tabnya tersembunyi, alarm bisa telat
+sampai satu menit. Untuk layar dinding yang selalu tampak, ini tidak masalah.
+
+**Browser menolak memutar suara sebelum ada klik.** Ini aturan browser, bukan
+bug yang bisa diakali — makanya alarm harus dinyalakan manual sekali tiap
+membuka halaman baru. Karena itu tombolnya sekalian membunyikan suara sebagai
+konfirmasi: kalau kamu mendengarnya, alarm benar-benar siap.
+
+**Default hanya major, dan itu disengaja.** Alarm yang terlalu sering berbunyi
+akan dimatikan orang — dan alarm yang dimatikan lebih buruk daripada tidak ada
+alarm, karena memberi rasa aman yang palsu. Degradasi (minor) sengaja senyap
+kecuali kamu meminta.
+
+**Alarm hanya untuk gangguan baru.** Membuka dashboard saat sudah ada 30
+gangguan lama tidak akan membunyikan 30 alarm sekaligus. Gangguan yang sedang
+dalam jendela pemeliharaan juga tidak pernah membunyikan alarm.
+
+---
+
+# Grafik realtime
+
+Grafik detail pelanggan menyegarkan diri sendiri untuk rentang **1 jam, 6 jam,
+dan 24 jam**. Titik hijau di kanan pemilih periode menandakan sedang aktif,
+dan labelnya menampilkan jam sampel terakhir yang masuk.
+
+## Batasan yang tidak bisa diakali
+
+**Datanya tetap datang tiap 60 detik.** Collector mengambil sampel sesuai
+`POLL_INTERVAL`. Grafik menyegarkan tiap 30 detik supaya sampel baru cepat
+terlihat, tapi menyegarkan lebih cepat dari itu tidak akan memunculkan apa pun
+— datanya memang belum ada. Kalau butuh lebih halus, yang diturunkan adalah
+`POLL_INTERVAL`, bukan interval refresh — dan itu menambah beban ke perangkat
+yang di-poll.
+
+## Kenapa cuma rentang pendek
+
+Rentang 7 hari ke atas tidak ikut menyegarkan diri. Satu titik di grafik 90
+hari mewakili 6 jam; menyegarkannya tiap setengah menit membebani database
+tanpa ada yang bisa terlihat berubah. Mode tanggal juga tidak — data masa lalu
+tidak berubah.
+
+## Cara kerjanya
+
+Grafik tetap **dirender di server**. Endpoint `/pelanggan/<id>/live/` memakai
+ulang `parse_period`, `fetch_series`, `usage_stats`, dan `build_chart` yang
+sama persis dengan halaman utamanya, lalu merender partial yang sama
+(`_chart.html`, `_stats.html`). JavaScript-nya cuma menukar isi kotak.
+
+Alasannya: kalau logika penggambaran diduplikasi di JavaScript, cepat atau
+lambat grafik live akan berbeda dari grafik hasil reload, dan selisih semacam
+itu susah dilacak. Pengujian memastikan SVG dari endpoint live identik dengan
+SVG di halaman.
+
+Efek sampingnya juga bagus: tidak ada library chart dari CDN, konsisten dengan
+keputusan sejak Fase 2 — dashboard tetap jalan di jaringan management yang
+terisolasi.
+
+Kalau server bermasalah, setelah 3 kegagalan berturut-turut interval melambat
+jadi 2 menit supaya tidak terus menghantam server yang sedang susah. Titiknya
+berubah merah. Saat tab dibuka kembali, grafik langsung disegarkan — browser
+memperlambat timer di tab tersembunyi, jadi tanpa ini yang terlihat pertama
+kali adalah data basi.

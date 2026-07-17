@@ -1,0 +1,38 @@
+{# Dipakai dua tempat: render awal halaman, dan endpoint live.
+   Satu sumber supaya tampilannya tidak pernah berbeda antara keduanya. #}
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+            gap:14px">
+  <div>
+    <div style="font-size:10px;color:var(--dim);letter-spacing:.08em">
+      VOLUME TOTAL</div>
+    <div class="mono" style="font-size:19px;font-weight:600;margin-top:3px">
+      {{ stats.vol_total }}</div>
+    <div class="mono stat-sub" style="font-size:11px;color:var(--muted);margin-top:2px">
+      &darr; {{ stats.vol_in }} &nbsp; &uarr; {{ stats.vol_out }}</div>
+  </div>
+  <div>
+    <div style="font-size:10px;color:var(--dim);letter-spacing:.08em">
+      RATA-RATA</div>
+    <div class="mono" style="font-size:15px;margin-top:5px;color:var(--blue)">
+      &darr; {{ stats.avg_in }}</div>
+    <div class="mono" style="font-size:15px;color:var(--orange)">
+      &uarr; {{ stats.avg_out }}</div>
+  </div>
+  <div>
+    <div style="font-size:10px;color:var(--dim);letter-spacing:.08em">
+      PUNCAK</div>
+    <div class="mono" style="font-size:15px;margin-top:5px;color:var(--blue)">
+      &darr; {{ stats.peak_in }}</div>
+    <div class="mono" style="font-size:15px;color:var(--orange)">
+      &uarr; {{ stats.peak_out }}</div>
+  </div>
+  <div>
+    <div style="font-size:10px;color:var(--dim);letter-spacing:.08em"
+         title="Nilai yang dilampaui hanya 5% waktu. Dasar penagihan yang lazim di ISP.">
+      95TH PERCENTILE</div>
+    <div class="mono" style="font-size:19px;font-weight:600;margin-top:3px">
+      {{ stats.p95|default:"—" }}</div>
+    <div class="mono" style="font-size:11px;color:var(--dim);margin-top:2px">
+      {% if stats.p95_stale %}maks 90 hari terakhir{% else %}rata-rata 5 menit{% endif %}</div>
+  </div>
+</div>
