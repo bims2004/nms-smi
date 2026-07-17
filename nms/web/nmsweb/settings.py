@@ -145,3 +145,49 @@ if not DEBUG and "*" in ALLOWED_HOSTS:
         "header apa pun. Isi dengan IP/hostname server yang sebenarnya.",
         RuntimeWarning,
     )
+
+
+# =========================================================
+# Logging
+# =========================================================
+# Bawaan Django hanya mengirim traceback 500 ke console saat DEBUG=True. Di
+# mode produksi, error request tidak tercatat ke mana pun kecuali ADMINS diisi
+# untuk email. Akibatnya: halaman balas "Server Error (500)", log container
+# bersih, dan tidak ada satu pun petunjuk kenapa.
+#
+# Config ini mengembalikan traceback ke stdout, yang di Docker berarti
+# `docker compose logs web`.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "ringkas": {
+            "format": "{levelname} {asctime} {name} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "ringkas",
+        },
+    },
+    "loggers": {
+        # Ini yang penting: traceback 500 muncul di log, bukan lenyap.
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "monitor": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

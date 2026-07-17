@@ -3,6 +3,8 @@ supaya NOC tidak perlu snmpwalk manual untuk mencari ifIndex.
 """
 import logging
 
+from . import crypto
+
 log = logging.getLogger(__name__)
 
 OID_IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"   # ifName
@@ -76,6 +78,25 @@ def discover_snmp_interfaces(device, timeout=5, retries=1):
     return rows, None
 
 
+def teks(v) -> str:
+    """Paksa nilai dari librouteros menjadi teks.
+
+    librouteros mengubah setiap nilai yang tampak seperti angka menjadi int:
+    username "12345" jadi int, uptime "45" jadi int. Mencampur int dan str
+    lalu mengurutkannya melempar TypeError:
+
+        '<' not supported between instances of 'int' and 'str'
+
+    Ini bukan masalah jaringan, tapi sempat terbaca begitu karena tertangkap
+    oleh except yang sama dengan kegagalan koneksi.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, bool):          # librouteros memetakan yes/no ke bool
+        return "ya" if v else "tidak"
+    return str(v)
+
+
 def discover_pppoe_sessions(device):
     """Ambil daftar sesi PPPoE aktif dari Mikrotik. Return (list, error)."""
     from librouteros import connect
@@ -85,17 +106,19 @@ def discover_pppoe_sessions(device):
         api = connect(
             host=str(device.ip),
             username=device.api_username or "",
-            password=device.api_password or "",
-            port=device.api_port or 8728,
+            # Password tersimpan terenkripsi. Tanpa dekripsi di sini,
+            # yang terkirim ke Mikrotik adalah ciphertext-nya.
+            password=crypto.dekripsi(device.api_password) or "",
+            port=int(device.api_port or 8728),
             timeout=10,
         )
         rows = []
         for row in api.path("ppp", "active"):
             rows.append({
-                "username": row.get("name", ""),
-                "address": row.get("address", ""),
-                "uptime": row.get("uptime", ""),
-                "caller_id": row.get("caller-id", ""),
+                "username": teks(row.get("name")),
+                "address": teks(row.get("address")),
+                "uptime": teks(row.get("uptime")),
+                "caller_id": teks(row.get("caller-id")),
             })
         rows.sort(key=lambda r: r["username"])
         return rows, None

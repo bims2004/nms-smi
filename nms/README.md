@@ -966,3 +966,128 @@ lebih berarti daripada enkripsi mana pun.
 **Jangan mengganti `NMS_SECRET_KEY`** setelah ada password tersimpan. Yang
 lama tidak akan bisa dibuka, dan sistem akan berhenti dengan pesan jelas
 (bukan diam-diam gagal login berjam-jam).
+
+
+---
+
+# Kalau dashboard balas "Server Error (500)"
+
+Lihat tracebacknya:
+
+```bash
+docker compose logs --tail=40 web
+```
+
+Cari baris `django.request Internal Server Error`. Beberapa baris di bawahnya
+ada penyebab sebenarnya.
+
+Kalau lognya bersih tanpa traceback sama sekali, paksa reproduksi:
+
+```bash
+docker compose exec web python manage.py shell -c "
+from django.test import Client
+from django.contrib.auth.models import User
+c = Client()
+c.force_login(User.objects.filter(is_superuser=True).first())
+r = c.get('/')
+print('status:', r.status_code)
+"
+```
+
+Test client melempar exception apa adanya, jadi traceback keluar tanpa perlu
+menyalakan `DJANGO_DEBUG=1` — yang akan memampang `SECRET_KEY` dan password
+database di halaman error.
+
+## Penyebab yang sering
+
+**`column customers.xxx does not exist`** — schema tertinggal dari kode. Model
+NMS memakai `managed = False`, jadi Django tidak membuat kolom sendiri:
+
+```bash
+bash scripts/upgrade-db.sh
+docker compose restart web
+```
+
+**`relation "nms_heartbeat" does not exist`** — sama, migrasi 05 belum masuk.
+
+**`ModuleNotFoundError: cryptography`** — image belum dibangun ulang setelah
+`requirements.txt` berubah:
+
+```bash
+docker compose up -d --build
+```
+
+**Halaman login berputar-putar tanpa pesan** — `HTTPS_ENABLED=1` tapi tidak ada
+proxy TLS di depannya. Browser mengirim cookie, Django menolaknya. Setel
+`HTTPS_ENABLED=0`, atau jalankan `docker compose --profile https up -d`.
+
+## Catatan: 500 yang bisu
+
+Versi sebelumnya tidak punya konfigurasi `LOGGING` sama sekali. Bawaan Django
+hanya mengirim traceback 500 ke console saat `DEBUG=True`; di mode produksi,
+error request tidak tercatat ke mana pun kecuali `ADMINS` diisi untuk email.
+
+Akibatnya persis yang paling menyusahkan: halaman balas "Server Error (500)",
+`docker compose logs web` bersih tanpa satu pun petunjuk, dan tidak ada cara
+tahu penyebabnya selain menebak. Sekarang `django.request` diarahkan ke
+stdout, jadi traceback muncul di `docker compose logs web`.
+
+---
+
+# Catatan: librouteros mengubah angka jadi int
+
+librouteros mengubah **setiap** nilai yang tampak seperti angka menjadi `int`:
+
+```python
+parse_word("=name=budi")           -> ("name", "budi")        str
+parse_word("=name=12345")          -> ("name", 12345)         int
+parse_word("=name=081234567890")   -> ("name", 81234567890)   int — nol hilang!
+```
+
+Ini menyebabkan tiga masalah yang semuanya sudah diperbaiki:
+
+**1. Halaman sesi PPPoE meledak.** Mengurutkan campuran int dan str melempar
+`'<' not supported between instances of 'int' and 'str'`. Errornya tertangkap
+oleh `except` yang sama dengan kegagalan koneksi, jadi terbaca sebagai
+"Tidak bisa terhubung ke API" — menyesatkan ke arah user/password dan
+firewall, padahal koneksinya justru berhasil.
+
+**2. Pelanggan PPPoE dengan username angka selamanya terbaca down.** Ini yang
+paling berbahaya karena diam:
+
+```python
+active_users.add(name)              # int 12345 dari API
+user = c["pppoe_username"]          # str "12345" dari database
+session_up = user in active_users   # "12345" in {12345} -> False. Selalu.
+```
+
+Tidak ada error, tidak ada log — pelanggan cuma terlihat down terus dan
+alerter mengirim `session_down` selamanya.
+
+**3. Nol di depan hancur.** `081234567890` jadi `81234567890`, dan tidak bisa
+dikembalikan — informasinya sudah hilang di dalam librouteros.
+
+Perbaikannya: `norm_user()` melewatkan nilai dari database ke transformasi
+yang **sama persis**, jadi keduanya rusak dengan cara identik dan tetap
+bertemu.
+
+**Kompromi yang perlu diketahui:** username `01` dan `1` jadi dianggap sama.
+Kalau di jaringanmu itu dua pelanggan berbeda, jangan pakai username angka
+murni.
+
+## Penjaganya
+
+```bash
+docker compose exec collector python tests/test_pollers.py
+```
+
+Uji itu juga menangkap kelas bug lain yang lolos dari `py_compile`: nama
+dipakai tanpa di-import. `python -m py_compile` hanya memeriksa sintaks, jadi
+modul yang memanggil `crypto.dekripsi()` tanpa `import crypto` tetap lolos —
+dan baru meledak saat fungsinya dijalankan. Di collector, ledakan itu
+tertangkap `except Exception` dan tercatat sebagai "Mikrotik API gagal", yang
+terbaca seperti masalah jaringan.
+
+Itu persis yang terjadi: enkripsi kredensial ditambahkan ke collector tapi
+`import`-nya tidak ikut, dan `discovery.py` tidak pernah mendekripsi sama
+sekali — jadi yang terkirim ke Mikrotik adalah ciphertext-nya.

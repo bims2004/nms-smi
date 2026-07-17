@@ -78,11 +78,22 @@
   {% if kind != 'snmp' %} · Hanya sesi yang sedang aktif yang terlihat di sini.{% endif %}
 </div>
 
-{% else %}
+{% elif not error %}
+{% comment %}
+  Hanya tampil kalau TIDAK ada error. Menampilkan "tidak ada sesi aktif"
+  bersamaan dengan pesan gagal itu menyesatkan — terbaca seolah perangkatnya
+  menjawab dan memang kosong, padahal datanya tidak pernah sampai.
+{% endcomment %}
 <div class="panel"><div class="empty">
   <h2>Tidak ada yang terbaca</h2>
   <p>{% if kind == 'snmp' %}Perangkat menjawab tapi daftar interface kosong.
      {% else %}Tidak ada sesi PPPoE yang sedang aktif di perangkat ini.{% endif %}</p>
+  <a class="btn" href="?scan=1">Coba lagi</a>
+</div></div>
+{% else %}
+<div class="panel"><div class="empty">
+  <h2>Gagal membaca perangkat</h2>
+  <p>Pesan lengkapnya ada di kotak merah di atas.</p>
   <a class="btn" href="?scan=1">Coba lagi</a>
 </div></div>
 {% endif %}
